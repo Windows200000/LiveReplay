@@ -102,7 +102,6 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 - [ ] Replays left early: decoding the client's cached battle results needs WG's packed field order (positional lists);
       proposal: archive the .dat files while running and learn the field order from replays that have both — not started, needs go-ahead
 
-- [ ] Performance: 3D cache files are 35-110 MB per map on disk (and would be traffic for the web viewer) — store objects indexed + quantised and compress better; serve lower ground mips to the web build; keep building geometry as is (user: geometry is ok)
 - [ ] Display settings panel: redesigned as one table (setting | 2D | 3D, On/Off chips) — user to check
 
 
@@ -126,6 +125,8 @@ Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
       runs once the code is pushed; not run yet
 
 ### Done
+- 3D cache on disk smaller: geometry quantised + delta-coded (as in the web packs), ground image stored once per map and shared
+  by all game modes (uncompressed DDS, loads faster) — e.g. Mines 40 MB per mode -> 9 MB per mode + 27 MB ground once
 - Project: renamed to LiveReplay; all upstream (GPL-3.0) code and text replaced (app, scanner, settings, launcher, tank names
   from the client, README, icon, CI); licence CC BY-NC-SA 4.0; published as a fresh repository with a clean history:
   https://github.com/Windows200000/LiveReplay

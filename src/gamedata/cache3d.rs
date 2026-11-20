@@ -14,7 +14,7 @@ use super::models::{parse_chunk_heights, parse_primitives, parse_sections, Mesh}
 use super::pkg::Pkg;
 use super::GameData;
 
-const FORMAT: u32 = 16;
+const FORMAT: u32 = 17;
 /// Keep every 4th height sample: 65 samples / 100 m -> 17 samples (6.25 m spacing).
 const TERRAIN_STEP: usize = 4;
 
@@ -90,27 +90,11 @@ fn put_u32(w: &mut Vec<u8>, v: u32) {
 fn put_f32(w: &mut Vec<u8>, v: f32) {
     w.extend_from_slice(&v.to_le_bytes());
 }
+/// Meshes are stored quantised and delta-coded (see `webpack::encode_mesh`): ~40% smaller.
 fn put_mesh(w: &mut Vec<u8>, m: &Mesh) {
-    put_u32(w, m.positions.len() as u32);
-    for p in &m.positions {
-        p.iter().for_each(|v| put_f32(w, *v));
-    }
-    put_u32(w, m.indices.len() as u32);
-    m.indices.iter().for_each(|i| put_u32(w, *i));
-    let has = m.colors.len() == m.positions.len() && !m.colors.is_empty();
-    put_u32(w, has as u32);
-    if has {
-        m.colors.iter().for_each(|c| w.extend_from_slice(c));
-    }
-    let tex = m.corner_uv.len() == m.indices.len() && m.tri_tex.len() * 3 == m.indices.len() && !m.indices.is_empty();
-    put_u32(w, tex as u32);
-    if tex {
-        m.corner_uv.iter().for_each(|uv| {
-            put_f32(w, uv[0]);
-            put_f32(w, uv[1]);
-        });
-        m.tri_tex.iter().for_each(|t| w.extend_from_slice(&t.to_le_bytes()));
-    }
+    let e = super::webpack::encode_mesh(m);
+    put_u32(w, e.len() as u32);
+    w.extend_from_slice(&e);
 }
 struct Rd<'a>(&'a [u8], usize);
 impl Rd<'_> {
@@ -127,24 +111,9 @@ impl Rd<'_> {
     }
     fn mesh(&mut self) -> Option<Mesh> {
         let n = self.u32()? as usize;
-        let positions = (0..n).map(|_| self.v3()).collect::<Option<Vec<_>>>()?;
-        let m = self.u32()? as usize;
-        let indices = (0..m).map(|_| self.u32()).collect::<Option<Vec<_>>>()?;
-        let colors = if self.u32()? == 1 {
-            let c = self.0.get(self.1..self.1 + n * 3)?.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
-            self.1 += n * 3;
-            c
-        } else {
-            Vec::new()
-        };
-        let (mut corner_uv, mut tri_tex) = (Vec::new(), Vec::new());
-        if self.u32()? == 1 {
-            corner_uv = (0..m).map(|_| Some([self.f32()?, self.f32()?])).collect::<Option<Vec<_>>>()?;
-            let raw = self.0.get(self.1..self.1 + (m / 3) * 2)?;
-            tri_tex = raw.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-            self.1 += (m / 3) * 2;
-        }
-        Some(Mesh { positions, indices, colors, corner_uv, tri_tex })
+        let m = super::webpack::decode_mesh(self.0.get(self.1..self.1 + n)?)?;
+        self.1 += n;
+        Some(m)
     }
 }
 
@@ -260,6 +229,7 @@ fn sub_len(a: [f32; 3], b: [f32; 3]) -> f32 {
     ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2) + (b[2] - a[2]).powi(2)).sqrt()
 }
 
+/// The ground image is not included: it is stored once per map (`ground_path`), shared by all modes.
 fn encode_scene(sc: &MapScene) -> Vec<u8> {
     let mut b = Vec::new();
     put_mesh(&mut b, &sc.objects);
@@ -267,7 +237,7 @@ fn encode_scene(sc: &MapScene) -> Vec<u8> {
     sc.water.iter().flatten().for_each(|v| put_f32(&mut b, *v));
     sc.albedo_extent.iter().for_each(|v| put_f32(&mut b, *v));
     put_u32(&mut b, sc.atlas_grid);
-    for tex in [&sc.atlas, &sc.albedo] {
+    for tex in [&sc.atlas, &None] {
         let t = tex.as_deref().unwrap_or(&[]);
         put_u32(&mut b, t.len() as u32);
         b.extend_from_slice(t);
@@ -373,6 +343,11 @@ impl Cache3D {
         Some(t)
     }
 
+    /// Ground image of a map (DDS, stored as is: DXT1 hardly compresses).
+    pub fn ground_path(map: &str) -> String {
+        format!("maps/{map}.ground.dds")
+    }
+
     pub fn scene_path(map: &str, gameplay_id: i32) -> String {
         format!("maps/{map}.{gameplay_id}.scene.bin")
     }
@@ -384,7 +359,8 @@ impl Cache3D {
     /// Buildings / water / ground texture for a map in a game mode (objects differ per mode).
     pub fn scene(&self, gd: &GameData, map: &str, gameplay_id: i32) -> Option<MapScene> {
         let path = self.dir.join(Self::scene_path(map, gameplay_id));
-        if let Some(sc) = std::fs::read(&path).ok().and_then(|b| decode_scene(&b)) {
+        if let Some(mut sc) = std::fs::read(&path).ok().and_then(|b| decode_scene(&b)) {
+            sc.albedo = std::fs::read(self.dir.join(Self::ground_path(map))).ok();
             return Some(sc);
         }
         let sc = self.build_scene(gd, map, gameplay_id)?;
@@ -502,9 +478,21 @@ impl Cache3D {
                 let base = super::dds::Image { width: x1 - x0, height: y1 - y0, rgba };
                 overview = Some(base.clone());
                 // Sharper: the map colour plus the ground textures' detail, up to 8 px/m.
-                let ppm = (8192.0 / (bx1 - bx0).max(bz1 - bz0)).min(8.0);
-                let img = super::ground::bake(gd, map, [bx0, bz0, bx1, bz1], ppm, &base, &|n: &str| self.find_file(gd, n)).unwrap_or(base);
-                scene.albedo = Some(super::ground::dds_dxt1_mips(&img));
+                // Baked once per map (all game modes share it).
+                let gpath = self.dir.join(Self::ground_path(map));
+                scene.albedo = match std::fs::read(&gpath) {
+                    Ok(b) => Some(b),
+                    Err(_) => {
+                        let ppm = (8192.0 / (bx1 - bx0).max(bz1 - bz0)).min(8.0);
+                        let img = super::ground::bake(gd, map, [bx0, bz0, bx1, bz1], ppm, &base, &|n: &str| self.find_file(gd, n)).unwrap_or(base);
+                        let dds = super::ground::dds_dxt1_mips(&img);
+                        if let Some(d) = gpath.parent() {
+                            let _ = std::fs::create_dir_all(d);
+                        }
+                        let _ = std::fs::write(&gpath, &dds);
+                        Some(dds)
+                    }
+                };
                 scene.albedo_extent = [bx0, bz0, bx1, bz1];
             }
         }
