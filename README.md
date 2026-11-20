@@ -108,6 +108,9 @@ Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
       Until then uploads from the app fail with a network error (uploading is off by default)
 
 ### Done
+- Web viewer stuck on loading in every browser (TypeError in `__wbindgen_init_externref_table`): the Docker image's
+  Debian binaryen 111 pointed the externref table export at the function table; now binaryen 125 from its releases,
+  and `web/build.sh` skips wasm-opt older than 125
 - Release 1.0.0; CI publishes all six desktop builds (Windows/Linux/macOS, x64 + arm64) to `latest-build` on every push,
   and a versioned release for each `v*` tag
 - The battle in progress is read from its packets (the game writes no header until the end): LIVE row and live upload work

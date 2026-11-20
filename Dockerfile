@@ -4,7 +4,11 @@ FROM rust:1-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 # wasm-bindgen-cli must match the wasm-bindgen version in Cargo.lock.
-RUN apt-get update && apt-get install -y --no-install-recommends binaryen && rm -rf /var/lib/apt/lists/* \
+# binaryen from its releases: Debian's (111) breaks the wasm's table exports (the page never loads).
+ARG BINARYEN=125
+RUN arch="$(uname -m)" \
+ && curl -sSfL "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN}/binaryen-version_${BINARYEN}-${arch}-linux.tar.gz" \
+    | tar xz -C /opt && ln -s "/opt/binaryen-version_${BINARYEN}/bin/wasm-opt" /usr/local/bin/wasm-opt && wasm-opt --version \
  && rustup target add wasm32-unknown-unknown \
  && cargo install wasm-bindgen-cli --locked --version "$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')"
 COPY . .
