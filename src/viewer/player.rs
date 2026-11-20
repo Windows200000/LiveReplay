@@ -191,7 +191,8 @@ fn ui_scale_slider(ui: &mut egui::Ui, scale: &mut f32) -> bool {
     }
     let value_at = |px: [f32; 4], x_px: f32| {
         let t = ((x_px - px[0]) / (px[2] - px[0])).clamp(0.0, 1.0);
-        ((SCALE_MIN + t * (SCALE_MAX - SCALE_MIN)) / 0.05).round() * 0.05
+        // 1% steps: the rest of the UI rescales smoothly instead of in jumps.
+        ((SCALE_MIN + t * (SCALE_MAX - SCALE_MIN)) * 100.0).round() / 100.0
     };
     match drag {
         Some((px, p0)) => {
@@ -201,19 +202,29 @@ fn ui_scale_slider(ui: &mut egui::Ui, scale: &mut f32) -> bool {
             if let Some(pos) = moved {
                 *scale = value_at(px, pos.x * ppp);
             }
-            // Drawn on top at the same physical position and size as when the drag started.
-            let k = p0 / ppp;
-            let r = egui::Rect::from_min_max(egui::pos2(px[0] / ppp, px[1] / ppp), egui::pos2(px[2] / ppp, px[3] / ppp));
+            // Drawn on top at the same physical position and size as when the drag started, laid
+            // out in whole screen pixels so nothing shifts by a sub-pixel when the scale changes.
+            let snap = |v: f32| v.round() / ppp;
+            let px_rect = |x0: f32, y0: f32, x1: f32, y1: f32| egui::Rect::from_min_max(egui::pos2(snap(x0), snap(y0)), egui::pos2(snap(x1), snap(y1)));
+            let u = p0; // physical pixels per (original) point
             let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, key));
-            let frame = egui::Rect::from_min_max(r.min - egui::vec2(10.0, 8.0) * k, r.max + egui::vec2(64.0, 8.0) * k);
-            painter.rect(frame, 6.0 * k, ui.visuals().window_fill, egui::Stroke::new(1.0 * k, ui.visuals().window_stroke.color));
-            paint_scale_slider(&painter, r, *scale, k, accent, rail);
-            painter.text(egui::pos2(r.right() + 12.0 * k, r.center().y), egui::Align2::LEFT_CENTER, format!("{:.0}%", *scale * 100.0), egui::FontId::proportional(14.0 * k), ui.visuals().text_color());
+            let frame = px_rect(px[0] - 10.0 * u, px[1] - 8.0 * u, px[2] + 64.0 * u, px[3] + 8.0 * u);
+            painter.rect(frame, (6.0 * u).round() / ppp, ui.visuals().window_fill, egui::Stroke::new((1.0 * u).round().max(1.0) / ppp, ui.visuals().window_stroke.color));
+            let cy = ((px[1] + px[3]) / 2.0).round();
+            let t = ((*scale - SCALE_MIN) / (SCALE_MAX - SCALE_MIN)).clamp(0.0, 1.0);
+            let hx = (px[0] + t * (px[2] - px[0])).round();
+            let rh = (2.5 * u).round().max(1.0);
+            painter.rect_filled(px_rect(px[0], cy - rh, px[2], cy + rh), rh / ppp, rail);
+            painter.rect_filled(px_rect(px[0], cy - rh, hx, cy + rh), rh / ppp, accent.gamma_multiply(0.7));
+            let hr = (7.0 * u).round();
+            painter.circle_filled(egui::pos2(snap(hx), snap(cy)), hr / ppp, Color32::from_gray(225));
+            painter.circle_stroke(egui::pos2(snap(hx), snap(cy)), hr / ppp, egui::Stroke::new((1.0 * u).round().max(1.0) / ppp, accent));
+            painter.text(egui::pos2(snap(px[2] + 12.0 * u), snap(cy)), egui::Align2::LEFT_CENTER, format!("{:.0}%", *scale * 100.0), egui::FontId::proportional((14.0 * u).round() / ppp), ui.visuals().text_color());
             ctx.request_repaint();
         }
         None => {
             paint_scale_slider(ui.painter(), rect, *scale, 1.0, accent, rail);
-            let px = [rect.left() * ppp, rect.top() * ppp, rect.right() * ppp, rect.bottom() * ppp];
+            let px = [(rect.left() * ppp).round(), (rect.top() * ppp).round(), (rect.right() * ppp).round(), (rect.bottom() * ppp).round()];
             if resp.is_pointer_button_down_on() {
                 if let Some(pos) = resp.interact_pointer_pos() {
                     *scale = value_at(px, pos.x * ppp);
