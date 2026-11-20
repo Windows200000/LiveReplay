@@ -63,6 +63,8 @@ pub struct ViewerSettings {
     pub view_3d: bool,
     /// Minimap in the bottom-right corner of the 3D view.
     pub corner_minimap: bool,
+    /// Display option rows above the view (2D, 3D) collapsed.
+    pub rows_collapsed: [bool; 2],
 }
 
 impl Default for ViewerSettings {
@@ -74,6 +76,7 @@ impl Default for ViewerSettings {
             speed: 1.0,
             view_3d: false,
             corner_minimap: true,
+            rows_collapsed: [false, false],
         }
     }
 }

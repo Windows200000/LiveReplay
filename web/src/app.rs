@@ -489,6 +489,7 @@ impl WebApp {
                 ui.label(RichText::new("World of Tanks battles on the minimap").color(Color32::from_gray(150)));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.hyperlink_to("Privacy", "/privacy");
+                    ui.hyperlink_to("Licences", "https://github.com/Windows200000/LiveReplay/blob/main/THIRD_PARTY_LICENSES.md");
                 });
             });
             ui.add_space(6.0);

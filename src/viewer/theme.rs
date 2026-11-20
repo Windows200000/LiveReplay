@@ -39,6 +39,8 @@ pub fn apply(ctx: &egui::Context) {
         w.bg_stroke = Stroke::new(1.0, BORDER);
     }
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
+    // Slider rails / checkbox boxes use this; lighter than the cards so they stay visible.
+    v.widgets.inactive.bg_fill = Color32::from_rgb(56, 64, 78);
     v.widgets.hovered.bg_stroke = Stroke::new(1.0, ACCENT.gamma_multiply(0.6));
     style.spacing.item_spacing = Vec2::new(8.0, 6.0);
     style.spacing.button_padding = Vec2::new(10.0, 5.0);

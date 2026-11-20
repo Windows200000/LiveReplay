@@ -150,89 +150,116 @@ fn capture_bar(painter: &egui::Painter, top: egui::Rect, captures: &[scene::Capt
 }
 
 /// On/off chip: highlighted when on (no tick boxes).
-fn chip(ui: &mut egui::Ui, value: &mut bool) -> bool {
-    let r = ui.add_sized([64.0, 22.0], egui::Button::new(if *value { "On" } else { "Off" }).selected(*value));
-    if r.clicked() {
-        *value = !*value;
-    }
-    r.clicked()
-}
-
-/// The Display menu: one row per setting, a column each for the 2D map and the 3D view.
+/// The Display menu: sizes and brightness per view, and the UI scale.
 fn display_settings_ui(ui: &mut egui::Ui, s: &mut ViewerSettings) -> bool {
     let mut changed = false;
-    let muted = Color32::from_gray(150);
-    let section = |ui: &mut egui::Ui, name: &str| {
-        ui.label(RichText::new(name).small().strong().color(muted));
-        ui.end_row();
-    };
-    egui::Grid::new("display_settings").num_columns(3).spacing([10.0, 6.0]).min_col_width(64.0).show(ui, |ui| {
+    egui::Grid::new("display_settings").num_columns(3).spacing([12.0, 8.0]).show(ui, |ui| {
         ui.label("");
         ui.label(RichText::new("2D").strong());
         ui.label(RichText::new("3D").strong());
         ui.end_row();
-
-        type Flag = fn(&mut super::settings::ViewSettings) -> &mut bool;
-        let mut row = |ui: &mut egui::Ui, name: &str, get: Flag, in2d: bool, in3d: bool| {
-            ui.label(name);
-            for (vs, on) in [(&mut s.view2d, in2d), (&mut s.view3d, in3d)] {
-                if on {
-                    changed |= chip(ui, get(vs));
-                } else {
-                    ui.label(RichText::new("–").color(muted));
-                }
-            }
-            ui.end_row();
-        };
-        section(ui, "LABELS");
-        row(ui, "Player name", |v| &mut v.label_player, true, true);
-        row(ui, "Tank name", |v| &mut v.label_tank, true, true);
-        section(ui, "HEALTH");
-        row(ui, "HP ring", |v| &mut v.hp_ring, true, true);
-        section(ui, "MAP");
-        row(ui, "Last known positions", |v| &mut v.show_last_known, true, true);
-        row(ui, "View range (564 m)", |v| &mut v.range_circle, true, true);
-        row(ui, "Shots", |v| &mut v.show_shots, true, true);
-        row(ui, "Grid", |v| &mut v.show_grid, true, false);
-        row(ui, "Bases / spawns", |v| &mut v.show_bases, true, false);
-        row(ui, "Textures", |v| &mut v.textures, false, true);
-
-        ui.label("HP text");
-        for (i, vs) in [&mut s.view2d, &mut s.view3d].into_iter().enumerate() {
-            let name = |m: HpText| match m {
-                HpText::Off => "Off",
-                HpText::Current => "Current",
-                HpText::Max => "Max",
-                HpText::CurrentOfMax => "Cur / max",
-            };
-            egui::ComboBox::from_id_source(("hp_text", i)).width(64.0).selected_text(name(vs.hp_text)).show_ui(ui, |ui| {
-                for m in [HpText::Off, HpText::Current, HpText::Max, HpText::CurrentOfMax] {
-                    changed |= ui.selectable_value(&mut vs.hp_text, m, name(m)).changed();
-                }
-            });
-        }
-        ui.end_row();
-
-        section(ui, "SIZE / LIGHT");
-        ui.spacing_mut().slider_width = 64.0;
+        ui.spacing_mut().slider_width = 90.0;
         ui.label("Marker size");
         for vs in [&mut s.view2d, &mut s.view3d] {
-            changed |= ui.add(egui::Slider::new(&mut vs.marker_scale, 0.5..=2.0).show_value(false)).changed();
+            changed |= ui.add(egui::Slider::new(&mut vs.marker_scale, 0.5..=2.0).show_value(false).trailing_fill(true)).changed();
         }
         ui.end_row();
         ui.label("Brightness");
         for vs in [&mut s.view2d, &mut s.view3d] {
-            changed |= ui.add(egui::Slider::new(&mut vs.map_brightness, 0.4..=1.2).show_value(false)).changed();
+            changed |= ui.add(egui::Slider::new(&mut vs.map_brightness, 0.4..=1.2).show_value(false).trailing_fill(true)).changed();
         }
         ui.end_row();
     });
     ui.separator();
     ui.horizontal(|ui| {
         ui.label("UI scale");
-        // Presets instead of a slider: a slider would rescale itself while being dragged.
-        egui::ComboBox::from_id_source("ui_scale").width(70.0).selected_text(format!("{:.0}%", s.ui_scale * 100.0)).show_ui(ui, |ui| {
-            for v in [0.8_f32, 0.9, 1.0, 1.1, 1.25, 1.4, 1.5, 1.75, 2.0] {
-                changed |= ui.selectable_value(&mut s.ui_scale, v, format!("{:.0}%", v * 100.0)).changed();
+        // Applied when the slider is released (it would rescale itself while being dragged).
+        let id = ui.id().with("ui_scale_drag");
+        let mut v: f32 = ui.data(|d| d.get_temp(id)).unwrap_or(s.ui_scale);
+        ui.spacing_mut().slider_width = 150.0;
+        let r = ui.add(egui::Slider::new(&mut v, 0.5..=2.5).step_by(0.05).trailing_fill(true).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+        if r.drag_stopped() || (r.changed() && !r.dragged()) {
+            s.ui_scale = v;
+            changed = true;
+            ui.data_mut(|d| d.remove::<f32>(id));
+        } else if r.dragged() {
+            ui.data_mut(|d| d.insert_temp(id, v));
+        }
+    });
+    ui.label(RichText::new("Also Ctrl + mouse wheel, Ctrl + / Ctrl -").small().color(Color32::from_gray(140)));
+    changed
+}
+
+/// Ctrl + mouse wheel and Ctrl +/-/0 change the UI scale. Returns true when it changed.
+pub fn ui_scale_input(ctx: &egui::Context, scale: &mut f32) -> bool {
+    let before = *scale;
+    let (zoom, keys) = ctx.input(|i| {
+        let keys = i.modifiers.command && [egui::Key::Plus, egui::Key::Equals, egui::Key::Minus, egui::Key::Num0].iter().any(|k| i.key_pressed(*k));
+        (if i.modifiers.command { i.zoom_delta() } else { 1.0 }, keys)
+    });
+    if keys {
+        // egui already changed its zoom for these keys: take it over.
+        *scale = ctx.zoom_factor();
+    } else if (zoom - 1.0).abs() > 0.0001 {
+        *scale *= zoom;
+    }
+    *scale = scale.clamp(0.5, 2.5);
+    (*scale - before).abs() > 0.0001
+}
+
+/// One row of display toggles above the view (collapsible). `is3d` picks the 3D-only options.
+fn toggle_row(ui: &mut egui::Ui, title: &str, vs: &mut super::settings::ViewSettings, is3d: bool, collapsed: &mut bool) -> bool {
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+        ui.spacing_mut().button_padding = egui::vec2(7.0, 2.0);
+        // Arrow (drawn: the font has no triangle glyphs) + title, both clickable.
+        let (r, arrow) = ui.allocate_exact_size(egui::vec2(16.0, 18.0), egui::Sense::click());
+        let c = r.center();
+        let col = ui.visuals().text_color();
+        let tri = if *collapsed {
+            vec![c + egui::vec2(-3.0, -5.0), c + egui::vec2(4.0, 0.0), c + egui::vec2(-3.0, 5.0)]
+        } else {
+            vec![c + egui::vec2(-5.0, -3.0), c + egui::vec2(5.0, -3.0), c + egui::vec2(0.0, 4.0)]
+        };
+        ui.painter().add(egui::Shape::convex_polygon(tri, col, egui::Stroke::NONE));
+        let label = ui.add(egui::Button::new(RichText::new(title).strong()).frame(false));
+        let hint = if *collapsed { "Show these display options" } else { "Hide these display options" };
+        if arrow.on_hover_text(hint).clicked() || label.on_hover_text(hint).clicked() {
+            *collapsed = !*collapsed;
+            changed = true;
+        }
+        if *collapsed {
+            return;
+        }
+        ui.add_space(6.0);
+        let mut t = |ui: &mut egui::Ui, name: &str, v: &mut bool| {
+            if ui.add(egui::Button::new(RichText::new(name).size(12.0)).selected(*v)).clicked() {
+                *v = !*v;
+                changed = true;
+            }
+        };
+        t(ui, "Player names", &mut vs.label_player);
+        t(ui, "Tank names", &mut vs.label_tank);
+        t(ui, "HP ring", &mut vs.hp_ring);
+        t(ui, "Last known", &mut vs.show_last_known);
+        t(ui, "View range", &mut vs.range_circle);
+        t(ui, "Shots", &mut vs.show_shots);
+        if is3d {
+            t(ui, "Textures", &mut vs.textures);
+        } else {
+            t(ui, "Grid", &mut vs.show_grid);
+        }
+        t(ui, "Bases", &mut vs.show_bases);
+        let name = |m: HpText| match m {
+            HpText::Off => "HP text: off",
+            HpText::Current => "HP text: current",
+            HpText::Max => "HP text: max",
+            HpText::CurrentOfMax => "HP text: cur / max",
+        };
+        egui::ComboBox::from_id_source(("hp_text", is3d)).width(130.0).selected_text(RichText::new(name(vs.hp_text)).size(12.0)).show_ui(ui, |ui| {
+            for m in [HpText::Off, HpText::Current, HpText::Max, HpText::CurrentOfMax] {
+                changed |= ui.selectable_value(&mut vs.hp_text, m, name(m)).changed();
             }
         });
     });
@@ -723,6 +750,9 @@ impl ReplayViewer {
             return;
         };
 
+        if ui_scale_input(ctx, &mut self.settings.ui_scale) {
+            self.settings.save();
+        }
         apply_ui_scale(ctx, self.settings.ui_scale);
 
         // Advance playback.
@@ -792,11 +822,26 @@ impl ReplayViewer {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.menu_button("Display ⚙", |ui| {
-                        ui.set_width(360.0);
+                        ui.set_width(300.0);
                         settings_changed |= display_settings_ui(ui, &mut self.settings);
                     });
                 });
             });
+        });
+
+        // Display toggles above the view: the 2D row (also the 3D view's corner minimap) and the 3D row.
+        let show_2d_row = !self.settings.view_3d || self.settings.corner_minimap;
+        egui::TopBottomPanel::top("view_toggles").show(ctx, |ui| {
+            ui.add_space(2.0);
+            let s = &mut self.settings;
+            if s.view_3d {
+                settings_changed |= toggle_row(ui, "3D", &mut s.view3d, true, &mut s.rows_collapsed[1]);
+            }
+            if show_2d_row {
+                let title = if s.view_3d { "Minimap" } else { "2D" };
+                settings_changed |= toggle_row(ui, title, &mut s.view2d, false, &mut s.rows_collapsed[0]);
+            }
+            ui.add_space(2.0);
         });
 
         egui::TopBottomPanel::bottom("viewer_bottom").show(ctx, |ui| {

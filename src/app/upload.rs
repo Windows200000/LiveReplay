@@ -42,8 +42,12 @@ fn agent() -> ureq::Agent {
 
 fn err(e: ureq::Error) -> String {
     match e {
-        ureq::Error::Status(code, r) => format!("server: {code} {}", r.into_string().unwrap_or_default()),
-        e => format!("network: {e}"),
+        ureq::Error::Status(code, r) => {
+            let msg = r.into_string().unwrap_or_default();
+            format!("server error {code}{}", if msg.is_empty() || msg.len() > 120 { String::new() } else { format!(": {msg}") })
+        }
+        // Full details in the hover text of the status line; keep the message short.
+        ureq::Error::Transport(_) => "can't reach wot.arne.my (offline, or the server is down)".to_string(),
     }
 }
 

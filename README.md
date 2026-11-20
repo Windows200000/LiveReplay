@@ -116,6 +116,13 @@ Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
 - [ ] Smaller web bundle: 1.4 MB gzipped before wasm-opt (the Docker build runs wasm-opt -Oz); next steps if needed: Brotli, fewer egui fonts
 
 ### Done
+- UI scale is a slider again (applied on release, so it doesn't rescale while dragging) plus Ctrl + mouse wheel and Ctrl +/-,
+  in the viewer and on the replay list; sliders show their filled bar again
+- Display toggles moved out of the menu into rows above the view: "3D" and "Minimap" rows in 3D, a "2D" row in 2D; each row
+  collapses with its arrow (remembered). The Display menu keeps sizes, brightness and UI scale
+- Upload errors are short ("can't reach wot.arne.my ...") and the status line is cut to one line (full text on hover)
+- Third-party licences: all dependencies are permissive (MIT / Apache-2.0 / BSD / Zlib ...); THIRD_PARTY_LICENSES.md lists
+  every crate with its licence and notice files; linked from the app's Settings, the website, and shipped with the release
 - First start asks once: "Upload your battles?" (grey "Don't upload" left, blue "Upload" right; Upload turns on live uploads);
   the per-upload consent dialog uses the same buttons
 - Icon emblem traced from the World of Tanks logo shape (outer rim, top bar, pointed stem, notched wings; within 1 px of the
@@ -237,15 +244,10 @@ Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
 - 3D textures for tiled PBS materials (most buildings: `albedoHeightTile0`); invisible collision shapes (`s_` without shader) no longer drawn
 - Test flags: `--2d`, `--play` (plus existing `--at`, `--3d`, `--look`)
 
-## Credits
-
-* Built with `egui` and `eframe`
-* Replay decoding (`src/replay`) and game-file readers (`src/gamedata`) are written for this project. No code was copied. The following projects were used as references for the file formats:
-  * [Monstrofil/replays_unpack](https://github.com/Monstrofil/replays_unpack): replay encryption, packet layout and the BigWorld entity-definition ordering rules
-  * [rajesh-rahul/wot-battle-results-parser](https://github.com/rajesh-rahul/wot-battle-results-parser) (MIT): packet notes and method-ID mapping approach
-  * The community `XmlUnpacker` scripts for the BigWorld packed-XML format
-* Created by the community, for the community
-
 ## Licence
 
 LiveReplay is licensed under [CC BY-NC-SA 4.0](LICENSE) (attribution, non-commercial, share-alike).
+
+Built with [egui / eframe](https://github.com/emilk/egui) and other open-source libraries under permissive licences
+(MIT, Apache-2.0, BSD, Zlib, ...): they stay under their own licences, listed with their notices in
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) (regenerate with `python scripts/third_party_licenses.py`).

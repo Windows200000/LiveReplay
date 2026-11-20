@@ -35,6 +35,8 @@ pub struct App {
     code_msg: String,
     /// Consent dialog open: replays waiting to be uploaded (empty = for live uploads).
     consent: Option<Vec<PathBuf>>,
+    /// UI scale on the replay list (shared with the viewer's setting).
+    ui_scale: f32,
     /// The consent dialog is the first-start question.
     consent_first: bool,
     /// "Delete all my data" was clicked once (asks again before deleting).
@@ -66,6 +68,7 @@ impl Default for App {
             code_msg: String::new(),
             consent: first_ask.then(Vec::new),
             consent_first: first_ask,
+            ui_scale: crate::viewer::settings::ViewerSettings::load().ui_scale,
             confirm_delete: false,
             cfg,
             entries: Vec::new(),
@@ -236,7 +239,9 @@ impl App {
                     }
                     let up = self.uploader.status.lock().unwrap().clone();
                     let line = if up.line.is_empty() { self.status.clone() } else { format!("{}   {}", self.status, up.line) };
-                    ui.label(RichText::new(line).color(Color32::from_gray(160)));
+                    // One line, cut to the free space (long errors used to run over the buttons).
+                    let w = ui.available_width().max(40.0);
+                    ui.add_sized([w, 20.0], egui::Label::new(RichText::new(&line).color(Color32::from_gray(160))).truncate()).on_hover_text(&line);
                     if up.queued > 0 {
                         ctx.request_repaint_after(std::time::Duration::from_millis(500));
                     }
@@ -282,7 +287,9 @@ impl App {
 
     /// Asked once before anything is uploaded.
     fn consent_window(&mut self, ctx: &egui::Context) {
-        let Some(paths) = &self.consent else { return };
+        if self.consent.is_none() {
+            return;
+        }
         let (mut yes, mut no) = (false, false);
         let title = if self.consent_first { "Upload your battles?" } else { "Upload to wot.arne.my?" };
         egui::Window::new(title).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
@@ -364,6 +371,7 @@ impl App {
             ui.label(RichText::new("Past replays: right-click one in the list > Upload.").color(Color32::from_gray(150)));
             ui.horizontal(|ui| {
                 ui.hyperlink_to("Privacy policy", upload::privacy_url());
+                ui.hyperlink_to("Open-source licences", "https://github.com/Windows200000/LiveReplay/blob/main/THIRD_PARTY_LICENSES.md");
                 if ui.add_enabled(self.code_rx.is_none(), egui::Button::new("Download my server data")).clicked() {
                     let (tx, rx) = mpsc::channel();
                     let key = draft.upload_key.clone();
@@ -471,7 +479,7 @@ impl eframe::App for App {
         if self.first_frame {
             self.first_frame = false;
             crate::viewer::theme::apply(ctx);
-            crate::viewer::player::apply_ui_scale(ctx, crate::viewer::settings::ViewerSettings::load().ui_scale);
+            crate::viewer::player::apply_ui_scale(ctx, self.ui_scale);
             self.entries = library::cached();
             self.sort_entries();
             self.rescan();
@@ -496,10 +504,19 @@ impl eframe::App for App {
             }
             if back {
                 self.viewer = None;
+                // The viewer may have changed the UI scale.
+                self.ui_scale = crate::viewer::settings::ViewerSettings::load().ui_scale;
             }
             return;
         }
 
+        // Ctrl + wheel / Ctrl +/- on the replay list too.
+        if crate::viewer::player::ui_scale_input(ctx, &mut self.ui_scale) {
+            let mut vs = crate::viewer::settings::ViewerSettings::load();
+            vs.ui_scale = self.ui_scale;
+            vs.save();
+        }
+        crate::viewer::player::apply_ui_scale(ctx, self.ui_scale);
         self.library_page(ctx);
         self.settings_window(ctx);
         self.consent_window(ctx);
