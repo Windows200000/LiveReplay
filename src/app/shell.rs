@@ -35,6 +35,8 @@ pub struct App {
     code_msg: String,
     /// Consent dialog open: replays waiting to be uploaded (empty = for live uploads).
     consent: Option<Vec<PathBuf>>,
+    /// The consent dialog is the first-start question.
+    consent_first: bool,
     /// "Delete all my data" was clicked once (asks again before deleting).
     confirm_delete: bool,
 }
@@ -55,12 +57,15 @@ impl Default for App {
     fn default() -> Self {
         crate::dirs::migrate_old_folders();
         let cfg = Config::load();
+        // First start: ask once whether to upload battles.
+        let first_ask = !cfg.upload_asked && !cfg.upload_consent;
         Self {
             uploader: Uploader::start(cfg.clone()),
             code_days: 7,
             code_rx: None,
             code_msg: String::new(),
-            consent: None,
+            consent: first_ask.then(Vec::new),
+            consent_first: first_ask,
             confirm_delete: false,
             cfg,
             entries: Vec::new(),
@@ -279,20 +284,39 @@ impl App {
     fn consent_window(&mut self, ctx: &egui::Context) {
         let Some(paths) = &self.consent else { return };
         let (mut yes, mut no) = (false, false);
-        egui::Window::new("Upload to wot.arne.my?").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+        let title = if self.consent_first { "Upload your battles?" } else { "Upload to wot.arne.my?" };
+        egui::Window::new(title).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
             ui.set_max_width(460.0);
-            ui.add(egui::Label::new(UPLOAD_NOTICE).wrap());
+            if self.consent_first {
+                ui.add(egui::Label::new("LiveReplay can upload the battles you play to wot.arne.my, so you can watch them in the browser, share them and let friends with a code watch you live. You can change this any time in Settings.").wrap());
+                ui.add_space(6.0);
+            }
+            ui.add(egui::Label::new(RichText::new(UPLOAD_NOTICE).color(Color32::from_gray(170))).wrap());
             ui.add_space(4.0);
             ui.hyperlink_to("Privacy policy", upload::privacy_url());
-            ui.add_space(8.0);
+            ui.add_space(10.0);
             ui.horizontal(|ui| {
-                yes = ui.button(if paths.is_empty() { "Agree and turn on" } else { "Agree and upload" }).clicked();
-                no = ui.button("Cancel").clicked();
+                // Grey "no" on the left, blue "yes" on the right.
+                let size = egui::vec2(130.0, 32.0);
+                no = ui.add(egui::Button::new(RichText::new("Don't upload").color(Color32::from_gray(225))).fill(Color32::from_gray(68)).min_size(size)).clicked();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    yes = ui.add(egui::Button::new(RichText::new("Upload").color(Color32::WHITE).strong()).fill(Color32::from_rgb(38, 112, 226)).min_size(size)).clicked();
+                });
             });
         });
+        if yes || no {
+            self.cfg.upload_asked = true;
+            if let Some(d) = &mut self.editing {
+                d.upload_asked = true;
+            }
+        }
         if yes {
             let paths = self.consent.take().unwrap_or_default();
             self.cfg.upload_consent = true;
+            if paths.is_empty() {
+                // Live uploads on (first start, or the Settings checkbox).
+                self.cfg.upload_live = true;
+            }
             if let Some(d) = &mut self.editing {
                 d.upload_consent = true;
                 if paths.is_empty() {
@@ -300,11 +324,15 @@ impl App {
                 }
             }
             self.cfg.save();
+            self.uploader.set_config(self.cfg.clone());
             if !paths.is_empty() {
                 self.uploader.upload(paths);
             }
+            self.consent_first = false;
         } else if no {
             self.consent = None;
+            self.consent_first = false;
+            self.cfg.save();
         }
     }
 

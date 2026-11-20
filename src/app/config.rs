@@ -16,6 +16,8 @@ pub struct Config {
     pub upload_live: bool,
     /// The user agreed to what uploading means (shown once, before the first upload).
     pub upload_consent: bool,
+    /// The first-start question about uploading was answered (either way).
+    pub upload_asked: bool,
     /// Secret that identifies this PC to the server (the first upload for a player name claims it).
     pub upload_key: String,
     /// Live viewing codes made here (code, expiry in Unix seconds), so they can be shown and revoked.

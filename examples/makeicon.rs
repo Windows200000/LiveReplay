@@ -69,10 +69,34 @@ fn poly_sd(x: f32, y: f32, pts: &[(f32, f32)]) -> f32 {
     d
 }
 
-/// The shield: flat top, straight sides, pointed bottom (rounded by `r`).
+/// Shield and emblem outlines, measured on a 900 px drawing (shield 254..646 x 177..720),
+/// mapped into the icon (0.80 tall, centred at x 0.47).
+const S: f32 = 0.80 / 543.0;
+fn m(p: (f32, f32)) -> (f32, f32) {
+    (0.47 + (p.0 - 450.0) * S, 0.07 + (p.1 - 177.0) * S)
+}
+fn sd_px(x: f32, y: f32, pts: &[(f32, f32)]) -> f32 {
+    let v: Vec<(f32, f32)> = pts.iter().map(|p| m(*p)).collect();
+    poly_sd(x, y, &v)
+}
+const OUTER: [(f32, f32); 7] = [(356.0, 177.0), (544.0, 177.0), (646.0, 279.0), (646.0, 524.0), (450.0, 720.0), (254.0, 524.0), (254.0, 279.0)];
+/// Width of the shield's rim.
+const RIM: f32 = 21.5 * S;
+const BAR: [(f32, f32); 4] = [(376.0, 218.0), (524.0, 218.0), (602.0, 297.0), (298.0, 297.0)];
+const STEM: [(f32, f32); 5] = [(411.0, 297.0), (489.0, 297.0), (489.0, 623.0), (450.0, 662.0), (411.0, 623.0)];
+// Wings: a rectangle plus a convex lower piece each (the notch makes the whole wing concave).
+const WING_L: [(f32, f32); 4] = [(297.0, 331.0), (373.0, 331.0), (373.0, 476.0), (297.0, 476.0)];
+const WING_L_LOW: [(f32, f32); 5] = [(297.0, 476.0), (373.0, 476.0), (409.0, 512.0), (355.0, 567.0), (297.0, 509.0)];
+const WING_R: [(f32, f32); 4] = [(527.0, 331.0), (603.0, 331.0), (603.0, 476.0), (527.0, 476.0)];
+const WING_R_LOW: [(f32, f32); 5] = [(527.0, 476.0), (603.0, 476.0), (603.0, 509.0), (545.0, 567.0), (491.0, 512.0)];
+
 fn shield_sd(x: f32, y: f32) -> f32 {
-    let r = 0.035;
-    poly_sd(x, y, &[(0.17 + r, 0.09 + r), (0.77 - r, 0.09 + r), (0.77 - r, 0.50), (0.47, 0.86 - r * 1.4), (0.17 + r, 0.50)]) - r
+    sd_px(x, y, &OUTER)
+}
+
+fn emblem_sd(x: f32, y: f32) -> f32 {
+    let wings = sd_px(x, y, &WING_L).min(sd_px(x, y, &WING_L_LOW)).min(sd_px(x, y, &WING_R)).min(sd_px(x, y, &WING_R_LOW));
+    sd_px(x, y, &BAR).min(sd_px(x, y, &STEM)).min(wings)
 }
 
 fn metal(x: f32, y: f32) -> [f32; 3] {
@@ -123,36 +147,34 @@ fn shade(x: f32, y: f32, n: usize) -> [f32; 4] {
         c = over(c, [0.0, 0.0, 0.0], 0.45);
     }
     let sd = shield_sd(x, y);
+    let bevel = |c: [f32; 4], d: f32| {
+        // Lighter on the top-left edges, darker bottom-right: a pressed-metal look.
+        if d > -0.011 {
+            let light = if x + y < 0.95 { [1.0, 1.0, 1.0] } else { [0.12, 0.13, 0.15] };
+            over(c, light, 0.32)
+        } else {
+            c
+        }
+    };
     if sd < 0.016 {
         c = over(c, rgb(0x15171a), 1.0); // outline
     }
     if sd < 0.0 {
-        c = over(c, metal(x, y), 1.0);
-        // Bevel: lighter on the top-left inner edge, darker bottom-right.
-        if sd > -0.016 {
-            let light = if x + y < 0.95 { [1.0, 1.0, 1.0] } else { [0.15, 0.16, 0.18] };
-            c = over(c, light, 0.35);
-        }
+        c = bevel(over(c, metal(x, y), 1.0), sd);
     }
-    // Dark inner field.
-    if sd < -0.048 {
-        let field = lerp3(rgb(0x30343b), rgb(0x121417), (y - 0.13) / 0.66);
+    // Dark field inside the rim.
+    if sd < -RIM {
+        let field = lerp3(rgb(0x30343b), rgb(0x101214), (y - 0.12) / 0.7);
         c = over(c, field, 1.0);
-    }
-    // The T emblem: top bar with downturned wings and a stem.
-    if sd < -0.074 {
-        let in_rect = |x0: f32, x1: f32, y0: f32, y1: f32| x >= x0 && x <= x1 && y >= y0 && y <= y1;
-        let bar = in_rect(0.255, 0.685, 0.175, 0.268);
-        let stem_w = 0.05 - (y - 0.27).max(0.0) * 0.03;
-        let stem = (x - 0.47).abs() < stem_w && y >= 0.2 && y <= 0.74;
-        // Wings: down from the bar ends, cut at a slant like the logo's.
-        let wing = |x0: f32, x1: f32, outer_left: bool| {
-            let cut = 0.50 - if outer_left { (x - x0) * 0.9 } else { (x1 - x) * 0.9 };
-            in_rect(x0, x1, 0.2, cut)
-        };
-        if bar || stem || wing(0.255, 0.335, true) || wing(0.605, 0.685, false) {
-            c = over(c, metal(x, y), 1.0);
+        // Inner edge of the rim casts a little shade.
+        if sd > -RIM - 0.01 {
+            c = over(c, [0.0, 0.0, 0.0], 0.35);
         }
+    }
+    // The emblem.
+    let e = emblem_sd(x, y);
+    if e < 0.0 {
+        c = bevel(over(c, metal(x, y), 1.0), e);
     }
     // LIVE badge.
     let (px0, px1, py0, py1) = (0.56, 0.98, 0.745, 0.915);

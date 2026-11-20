@@ -116,6 +116,10 @@ Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
 - [ ] Smaller web bundle: 1.4 MB gzipped before wasm-opt (the Docker build runs wasm-opt -Oz); next steps if needed: Brotli, fewer egui fonts
 
 ### Done
+- First start asks once: "Upload your battles?" (grey "Don't upload" left, blue "Upload" right; Upload turns on live uploads);
+  the per-upload consent dialog uses the same buttons
+- Icon emblem traced from the World of Tanks logo shape (outer rim, top bar, pointed stem, notched wings; within 1 px of the
+  reference), with the metal shading, film strip and LIVE badge
 - 3D: right-click a tank on the corner minimap to follow it (like right-clicking it in the 3D view)
 - Smaller geometry for the 3D cache and web packs: a triangle corner reuses its vertex's last texture coordinate with a one-byte
   flag (UVs were 2/3 of the data): Mines web pack 9.1 -> 7.5 MB (with the extra cover objects: 9.0 MB)
