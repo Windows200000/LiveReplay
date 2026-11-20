@@ -99,8 +99,6 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 #### Viewer
 - [ ] Live Oaks lake buildings: fisher houses on stilts, piers and the floating shop render in the current build — waiting for the user to confirm
 
-- [ ] Replays left early: decoding the client's cached battle results needs WG's packed field order (positional lists);
-      proposal: archive the .dat files while running and learn the field order from replays that have both — not started, needs go-ahead
 
 - [ ] Display settings panel: redesigned as one table (setting | 2D | 3D, On/Off chips) — user to check
 
@@ -125,6 +123,12 @@ Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
       runs once the code is pushed; not run yet
 
 ### Done
+- Replays left before the battle ended get their results: the app archives the game's cached battle results
+  (`%APPDATA%\Wargaming.net\WorldOfTanksattle_results`, the game deletes them after about a day) and learns their
+  positional layout per game version by pairing them with replays that have a results block (same values in the same places,
+  including each field's default); checked on 22 battles: 5236/5236 fields identical. Viewer stats cards, deaths, winner and the
+  replay list's damage column use them. Works only for battles the app saw the results of (it archives at start, on rescans and
+  every minute while running)
 - 3D cache on disk smaller: geometry quantised + delta-coded (as in the web packs), ground image stored once per map and shared
   by all game modes (uncompressed DDS, loads faster) — e.g. Mines 40 MB per mode -> 9 MB per mode + 27 MB ground once
 - Project: renamed to LiveReplay; all upstream (GPL-3.0) code and text replaced (app, scanner, settings, launcher, tank names

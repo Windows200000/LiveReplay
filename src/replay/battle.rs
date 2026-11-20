@@ -414,8 +414,18 @@ impl Battle {
                 }
             }
         }
-        // Results block: [results, vehicles (full roster), frags]
-        if let Some(res) = rf.results().and_then(|r| r.as_array()).filter(|_| !like_live) {
+        // Results block: [results, vehicles (full roster), frags]. A replay left before the end has
+        // none: rebuilt from the game's cached results when possible.
+        #[cfg(not(target_arch = "wasm32"))]
+        let cached = if rf.results().is_none() && !like_live {
+            let ids: Vec<i32> = si.get("vehicles").and_then(|v| v.as_object()).map(|o| o.keys().filter_map(|k| k.parse().ok()).collect()).unwrap_or_default();
+            super::cached_results::results_for(&ids)
+        } else {
+            None
+        };
+        #[cfg(target_arch = "wasm32")]
+        let cached: Option<serde_json::Value> = None;
+        if let Some(res) = rf.results().or(cached.as_ref()).and_then(|r| r.as_array()).filter(|_| !like_live) {
             if let Some(vs) = res.get(1).and_then(|v| v.as_object()) {
                 for (k, v) in vs {
                     if let Ok(id) = k.parse() {

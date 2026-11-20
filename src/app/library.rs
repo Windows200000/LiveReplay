@@ -97,6 +97,16 @@ pub fn summarize(path: &Path, game: Option<&GameData>) -> Option<ReplayEntry> {
         let personal = file.results()?.get(0)?.get("personal")?.as_object()?.values().next()?.get("damageDealt")?.as_i64();
         personal
     });
+    // Left before the end (no results block): the game's cached results, if archived.
+    let damage = damage.or_else(|| {
+        if file.results().is_some() {
+            return None;
+        }
+        let vehicles = info.get("vehicles")?.as_object()?;
+        let ids: Vec<i32> = vehicles.keys().filter_map(|k| k.parse().ok()).collect();
+        let me = vehicles.iter().find(|(_, v)| v.get("name").and_then(|n| n.as_str()) == Some(player_name.as_str()))?.0;
+        crate::replay::cached_results::results_for(&ids)?.get(0)?.get("vehicles")?.get(me)?.get(0)?.get("damageDealt")?.as_i64()
+    });
     Some(ReplayEntry {
         path: path.to_string_lossy().into_owned(),
         player_name,
@@ -141,7 +151,14 @@ pub fn scan(dir: PathBuf, game_dir: String) -> mpsc::Receiver<ScanEvent> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let game = crate::gamedata::find_game_dir(&game_dir).map(GameData::new);
+        // Keep the game's cached battle results (it deletes old ones) and learn their layout.
+        let new_results = crate::replay::cached_results::archive_new();
+        crate::replay::cached_results::learn_from_folder(&dir);
         let mut old = load_index();
+        if new_results > 0 {
+            // Replays left early may now have results: read those again.
+            old.files.retain(|_, (_, _, e)| e.damage > 0);
+        }
         let mut files: Vec<(String, PathBuf, u64, u64)> = std::fs::read_dir(&dir)
             .into_iter()
             .flatten()

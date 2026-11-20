@@ -145,7 +145,7 @@ impl Uploader {
         let status = Arc::new(Mutex::new(Status::default()));
         let live = Arc::new(AtomicBool::new(cfg.upload_live));
         let (st, lv) = (status.clone(), live.clone());
-        std::thread::spawn(move || Worker { cfg, status: st, live: lv, checked: HashSet::new(), current: None }.run(rx));
+        std::thread::spawn(move || Worker { cfg, status: st, live: lv, checked: HashSet::new(), current: None, last_archive: Instant::now() }.run(rx));
         Uploader { jobs: tx, status, live }
     }
 
@@ -162,7 +162,7 @@ impl Uploader {
 
 /// Upload replays right now on this thread (command line `--upload`); the web link of each.
 pub fn upload_files(cfg: &Config, paths: &[PathBuf]) -> Vec<Result<String, String>> {
-    let mut w = Worker { cfg: cfg.clone(), status: Default::default(), live: Default::default(), checked: HashSet::new(), current: None };
+    let mut w = Worker { cfg: cfg.clone(), status: Default::default(), live: Default::default(), checked: HashSet::new(), current: None, last_archive: Instant::now() };
     paths.iter().map(|p| w.upload_replay(p, None).map(|id| battle_link(&id))).collect()
 }
 
@@ -183,6 +183,7 @@ struct Worker {
     /// Assets already checked this session.
     checked: HashSet<String>,
     current: Option<LiveUpload>,
+    last_archive: Instant,
 }
 
 impl Worker {
@@ -218,6 +219,11 @@ impl Worker {
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+            // Archive the game's cached battle results before it deletes them (once a minute).
+            if self.last_archive.elapsed() > Duration::from_secs(60) {
+                self.last_archive = Instant::now();
+                crate::replay::cached_results::archive_new();
             }
             if self.live.load(Ordering::Relaxed) {
                 if let Err(e) = self.live_tick() {

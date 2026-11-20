@@ -9,6 +9,8 @@ pub enum Py {
     Int(i64),
     Float(f64),
     Str(String),
+    /// A Python 2 byte string that isn't valid UTF-8 (e.g. compressed data).
+    Bytes(Vec<u8>),
     List(Vec<Py>),
     Dict(Vec<(Py, Py)>),
     Opaque,
@@ -50,6 +52,14 @@ impl Py {
             Py::Dict(d) => d.iter().find(|(k, _)| k.str() == key).map(|(_, v)| v),
             _ => None,
         }
+    }
+}
+
+/// Byte string: text when it is UTF-8, raw bytes otherwise.
+fn bytes(b: &[u8]) -> Py {
+    match std::str::from_utf8(b) {
+        Ok(s) => Py::Str(s.to_string()),
+        Err(_) => Py::Bytes(b.to_vec()),
     }
 }
 
@@ -114,9 +124,13 @@ pub fn loads(b: &[u8]) -> Option<Py> {
             b'G' => stack.push(Py::Float(f64::from_be_bytes(take(&mut p, 8)?.try_into().ok()?))),
             b'U' => {
                 let n = take(&mut p, 1)?[0] as usize;
-                stack.push(Py::Str(String::from_utf8_lossy(take(&mut p, n)?).into_owned()));
+                stack.push(bytes(take(&mut p, n)?));
             }
-            b'T' | b'X' => {
+            b'T' => {
+                let n = u32le(take(&mut p, 4)?) as usize;
+                stack.push(bytes(take(&mut p, n)?));
+            }
+            b'X' => {
                 let n = u32le(take(&mut p, 4)?) as usize;
                 stack.push(Py::Str(String::from_utf8_lossy(take(&mut p, n)?).into_owned()));
             }
