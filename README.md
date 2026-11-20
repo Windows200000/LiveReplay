@@ -114,7 +114,7 @@ Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
       Until then uploads from the app fail with a network error (uploading is off by default)
 
 ### Done
-- Deaths of tanks out of view (learned from the battle-wide death record at the moment they die) no longer show as one big damage number at the last known position: damage numbers only for tanks in view
+- Deaths of tanks out of view (learned from the battle-wide death record at the moment they die) no longer show as one big damage number at the last known position: damage numbers only for tanks in view; team-list health bars of tanks out of view are faded (health when last seen: replays carry no health updates out of view, checked: `onVehicleHealthChanged` / team health bars are not recorded)
 - Damaged / destroyed modules and crew above the name labels (alive tanks only, 2D and 3D), with the game's crit icons
   (orange outline = damaged, red = destroyed; crew tinted red). What replays contain: track hits for every tank in view
   (shown until the tank drives again), and enemy modules / crew when the recording player got that information

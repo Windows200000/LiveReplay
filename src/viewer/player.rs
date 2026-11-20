@@ -956,13 +956,19 @@ impl ReplayViewer {
                             if !selected && (map_hover == Some(v.id) || r.hovered()) {
                                 ui.painter().rect_stroke(r.rect.expand(1.0), 3.0, egui::Stroke::new(1.5_f32, super::minimap2d::HOVER));
                             }
+                            // Out of view, the replay has no health updates (only the death, when it
+                            // happens): the bar is the health when last seen, drawn faded.
+                            let unseen = !dead && Some(v.id) != battle.recorder_vehicle && !scene::seen_at(v, t);
                             if v.max_health > 0 {
                                 let frac = if dead { 0.0 } else { hp.map(|h| h as f32 / v.max_health as f32).unwrap_or(1.0).clamp(0.0, 1.0) };
-                                let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 3.0), egui::Sense::hover());
+                                let (rect, bar) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 3.0), egui::Sense::hover());
                                 ui.painter().rect_filled(rect, 1.0, Color32::from_black_alpha(120));
                                 let mut fill = rect;
                                 fill.set_width(rect.width() * frac);
-                                ui.painter().rect_filled(fill, 1.0, if hp.is_some() { color } else { color.gamma_multiply(0.35) });
+                                ui.painter().rect_filled(fill, 1.0, if hp.is_some() && !unseen { color } else { color.gamma_multiply(0.35) });
+                                if unseen {
+                                    bar.on_hover_text("Health when last seen (the replay has no updates while a tank is out of view)");
+                                }
                             }
                         }
                     });

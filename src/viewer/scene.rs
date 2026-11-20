@@ -217,7 +217,7 @@ const POP_HOLD: f32 = 0.8;
 const POP_FADE: f32 = 1.4;
 
 /// The tank was in view at `t` (in the area of interest with a recent position).
-fn seen_at(rec: &VehicleRec, t: f32) -> bool {
+pub fn seen_at(rec: &VehicleRec, t: f32) -> bool {
     let in_aoi = last_le(&rec.visibility, t, |v| v.0).map(|i| rec.visibility[i].1).unwrap_or(true);
     let fresh = last_le(&rec.track, t + 0.05, |s| s.t).is_some_and(|i| t - rec.track[i].t < 2.5);
     in_aoi && fresh
