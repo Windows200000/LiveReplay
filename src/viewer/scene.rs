@@ -216,6 +216,13 @@ pub fn units_at(b: &Battle, t: f32, include_last_known: bool) -> Vec<Unit> {
 const POP_HOLD: f32 = 0.8;
 const POP_FADE: f32 = 1.4;
 
+/// The tank was in view at `t` (in the area of interest with a recent position).
+fn seen_at(rec: &VehicleRec, t: f32) -> bool {
+    let in_aoi = last_le(&rec.visibility, t, |v| v.0).map(|i| rec.visibility[i].1).unwrap_or(true);
+    let fresh = last_le(&rec.track, t + 0.05, |s| s.t).is_some_and(|i| t - rec.track[i].t < 2.5);
+    in_aoi && fresh
+}
+
 fn damage_popup(rec: &VehicleRec, t: f32) -> Option<(i32, f32)> {
     let n = rec.health.partition_point(|h| h.0 <= t);
     let mut total = 0;
@@ -224,6 +231,11 @@ fn damage_popup(rec: &VehicleRec, t: f32) -> Option<(i32, f32)> {
     for i in (1..n).rev() {
         let (ti, hi) = rec.health[i];
         let drop = rec.health[i - 1].1 - hi;
+        // Only hits on tanks in view: a death learned while the tank was out of view (from the
+        // battle-wide death record) is not one big hit at its last known position.
+        if drop > 0 && !seen_at(rec, ti) {
+            continue;
+        }
         if drop <= 0 {
             continue;
         }
