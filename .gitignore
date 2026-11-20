@@ -1,0 +1,7 @@
+# Build output
+/target/
+**/target/
+# Local scratch
+*.log
+*.err
+/web-dist/

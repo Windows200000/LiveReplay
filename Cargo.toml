@@ -1,0 +1,57 @@
+[workspace]
+members = [".", "api", "server", "web"]
+resolver = "2"
+
+[package]
+name = "livereplay"
+version = "0.3.0"
+edition = "2021"
+description = "World of Tanks replay viewer: in-game style 2D minimap and simplified 3D, live battles, replay library"
+license = "CC-BY-NC-SA-4.0"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "livereplay"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.28"
+egui = "0.28"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+# Replay decryption + decompression (the replay and game-data parsers are our own).
+blowfish = "0.9"
+flate2 = "1"
+sha2 = "0.10"
+livereplay-api = { path = "api" }
+# Compact binary encoding of battles for the server and the web viewer.
+# Self-describing (fields by name), so stored battles stay readable when fields are added.
+ciborium = "0.2"
+
+# Desktop only: settings and cache folders.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+directories = "5"
+# Uploads to the LiveReplay server (blocking, from background threads).
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+getrandom = "0.2"
+
+# Web build: viewer settings in localStorage.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", features = ["Window", "Storage"] }
+
+[build-dependencies]
+embed-resource = "3.0.9"
+
+[profile.release]
+opt-level = 3
+
+# Web viewer: small download (cargo build --profile web --target wasm32-unknown-unknown -p livereplay-web).
+[profile.web]
+inherits = "release"
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

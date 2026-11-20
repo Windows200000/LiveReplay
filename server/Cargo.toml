@@ -1,0 +1,17 @@
+[package]
+name = "livereplay-server"
+version = "0.1.0"
+edition = "2021"
+description = "LiveReplay server: stores battles uploaded by desktop clients and serves the web viewer"
+license = "CC-BY-NC-SA-4.0"
+
+# Deliberately small: no game code, no async runtime, no database server. Battles arrive already
+# decoded and compressed by the desktop client and are served as they are.
+[dependencies]
+livereplay-api = { path = "../api" }
+tiny_http = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+getrandom = "0.2"
+flate2 = "1"

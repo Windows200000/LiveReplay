@@ -1,0 +1,57 @@
+# Builds the desktop app for Windows, Linux and macOS (x64 + arm64), checks the server and web
+# viewer, and builds the Docker image. Artifacts: one desktop binary per platform.
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-x64, os: windows-latest, bin: livereplay.exe }
+          - { name: windows-arm64, os: windows-11-arm, bin: livereplay.exe }
+          - { name: linux-x64, os: ubuntu-24.04, bin: livereplay }
+          - { name: linux-arm64, os: ubuntu-24.04-arm, bin: livereplay }
+          - { name: macos-x64, os: macos-13, bin: livereplay }
+          - { name: macos-arm64, os: macos-14, bin: livereplay }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux libraries (egui/winit)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libgtk-3-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+      - run: cargo test --release --lib
+      - run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: livereplay-${{ matrix.name }}
+          path: target/release/${{ matrix.bin }}
+
+  server-and-web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --release -p livereplay-server
+      - run: cargo build --release --target wasm32-unknown-unknown -p livereplay-web
+
+  docker:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t livereplay-server .

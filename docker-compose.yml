@@ -1,0 +1,35 @@
+# LiveReplay server behind Caddy (automatic HTTPS). Point DOMAIN's DNS at this machine, put the
+# settings below in a `.env` file next to this one, then: docker compose up -d --build
+#
+#   DOMAIN=wot.arne.my
+#   OPERATOR_NAME=...        # who runs the site (shown on /privacy, GDPR controller)
+#   OPERATOR_CONTACT=...     # e-mail or URL for data requests (shown on /privacy)
+#   OPERATOR_ADDRESS=...     # optional postal address (shown on /privacy)
+#   ADMIN_TOKEN=...          # long random string: removal requests (see README)
+services:
+  livereplay:
+    build: .
+    restart: unless-stopped
+    environment:
+      - OPERATOR_NAME=${OPERATOR_NAME:-}
+      - OPERATOR_CONTACT=${OPERATOR_CONTACT:-}
+      - OPERATOR_ADDRESS=${OPERATOR_ADDRESS:-}
+      - ADMIN_TOKEN=${ADMIN_TOKEN:-}
+    volumes:
+      - livereplay-data:/data   # battles, codes, uploaded map data: back this up
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN=${DOMAIN:-wot.arne.my}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+volumes:
+  livereplay-data:
+  caddy-data:
+  caddy-config:

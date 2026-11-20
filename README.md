@@ -1,0 +1,240 @@
+<p align="center"><img src="assets/icon.png" width="96" alt="LiveReplay icon"></p>
+
+# LiveReplay
+
+Watch World of Tanks battles on an in-game style minimap or in a simplified 3D view: your saved replays, the battle you
+are playing right now, and other players' battles in the browser.
+
+Website: **https://wot.arne.my** · Latest Windows build: [Releases](https://github.com/Windows200000/LiveReplay/releases/tag/latest-build)
+
+> LiveReplay is a fan project and is not affiliated with or endorsed by Wargaming. World of Tanks is a trademark of
+> Wargaming. Nothing from the game is part of this repository: maps, models, textures, icons and game definitions are read
+> from your own game installation at runtime.
+
+## Features
+
+**Replay library**
+* All `.wotreplay` files of your game folder with player, tank, map, mode, date, damage, server and version
+* Sort by any column, filter by values (with search), date ranges and damage ranges; right-click for quick filters
+* Open in the viewer, watch in the game client, upload to the website, copy the web link, delete from the server
+
+**Viewer (2D)**
+* The game's own minimap picture, grid, bases, spawn points and random-event zones
+* Tanks with class markers, team colours, labels, HP rings and numbers; spotted / last known / destroyed states
+* Shots as ballistic arcs from the barrel to the impact point, hit flashes and damage numbers
+* In-game style top bar (team HP, score, class icons), base capture bar (also blocked captures), battle clock
+* Team lists, stats card per player (live stats up to that moment and the full battle result), tomato.gg link
+* Playback 0.25x-16x, seek bar, adjustable display settings per view, UI scale
+
+**Viewer (3D)**
+* Terrain, buildings, rocks and water built from your game files (simplified and cached), textured ground and objects
+* Tanks with the recorded hull orientation, turret and gun angles; shots, markers and labels as in 2D
+* Orbit / pan / zoom camera, follow a tank, corner minimap (click or drag to move the camera)
+
+**Live battles**
+* Follow the battle you are playing right now (from the replay the game writes while you play)
+* All tanks, also enemies that were hidden at the start and deaths out of view
+
+**Website** (the same viewer in the browser)
+* Battles uploaded by players, newest first, with a player filter; 2D and 3D
+* Live battles of players who gave you a viewing code (valid up to one month)
+* Several players' uploads of the same battle merged into one view
+* Share links to an exact moment, view, selected tank and camera
+
+## Download and use
+
+1. Download `livereplay-windows-x64.exe` from the [latest build](https://github.com/Windows200000/LiveReplay/releases/tag/latest-build)
+   and run it. The game folder is found automatically (otherwise set it in Settings).
+2. Double-click a replay, or press **Live battle** while playing (replay recording must be on in the game settings).
+3. To put battles on the website: Settings > Server, or right-click replays > Upload. Uploading is off until you agree.
+
+Command line: `livereplay [<file.wotreplay> [--at <seconds after battle start>]] [--live] [--2d|--3d] [--play]`,
+`livereplay --upload <files>` (upload without opening a window). Test options: `--pin`, `--settings`,
+`--look x,z --cam yaw,pitch,dist`, `--link "<share link options>"`.
+
+## Building
+
+Rust (stable). `cargo build --release` builds the desktop app (`target/release/livereplay`). On Linux the egui/winit
+libraries are needed (see `.github/workflows/build.yml`). The server and web viewer: see below.
+
+Crates: `livereplay` (desktop app + shared library: replay decoder, game-file readers, viewer), `api` (HTTP API types),
+`server`, `web` (WebAssembly viewer).
+
+## Server and web viewer
+
+The desktop app decodes replays (it has the game files) and sends a compact form of each battle to the server; the server
+stores and serves it, and the web viewer (the same viewer compiled to WebAssembly) shows it in the browser.
+
+* Run it (Docker): put a `.env` next to `docker-compose.yml` with `DOMAIN` (default `wot.arne.my`), `OPERATOR_NAME`,
+  `OPERATOR_CONTACT` (e-mail or URL for data requests), optionally `OPERATOR_ADDRESS`, and `ADMIN_TOKEN` (long random
+  string), point the domain's DNS at the machine, then `docker compose up -d --build`. Caddy gets the HTTPS certificate.
+  Data lives in the `livereplay-data` volume (back it up). Without Docker: `cargo build --release -p livereplay-server`,
+  `sh web/build.sh`, then run `livereplay-server` (env `BIND`, `DATA_DIR`, `WEB_DIR`, `THREADS`, plus the ones above).
+* Limits (env, optional): `MAX_BATTLES_PER_DAY` (300 per uploader), `MAX_KEY_MB` (2048), `MAX_TOTAL_GB` (50).
+* Privacy (GDPR): the policy is served at `/privacy` from the operator settings. No IP addresses or access logs, no cookies,
+  no tracking. Uploaders consent in the app before the first upload and can download (`GET /api/me`) or delete
+  (`DELETE /api/me`, `DELETE /api/battles/<id>`) their data from Settings. Removal request from a player who didn't upload:
+  `curl -X DELETE -H "X-Livereplay-Admin: $ADMIN_TOKEN" https://<domain>/api/admin/players/<player name>` deletes every
+  battle with that name (answer within one month).
+* API: see `api/src/lib.rs`.
+* Nothing from the game is part of the server or image. The minimap pictures, map layouts and icons the web viewer needs are
+  uploaded by the desktop app from the player's own game files.
+
+## Roadmap
+
+What's planned, what's done, and the project rules. Kept up to date with every change.
+
+### Rules
+- No per-map fixes: every fix must be general and work on all maps, including ones never tested.
+- Nothing from World of Tanks (textures, models, icons, defs) is ever committed — everything is read from the user's own client at runtime.
+- Keep it lean: no whole other repos; only inspiration or licence-compatible snippets, credited in the README.
+- After every new build, launch the new exe for the user (keep the current build running).
+- After every new build, upload it to the rolling GitHub pre-release `latest-build` (only the newest build):
+  https://github.com/Windows200000/LiveReplay/releases/tag/latest-build
+- Finish the client before the server.
+- Keep this roadmap (in README.md) complete and current at all times, with every request the user made in the session (also those from before context compaction); work through it without stopping until done.
+
+### Open
+
+#### Viewer
+- [ ] Live Oaks lake buildings: fisher houses on stilts, piers and the floating shop render in the current build — waiting for the user to confirm
+
+- [ ] Replays left early: decoding the client's cached battle results needs WG's packed field order (positional lists);
+      proposal: archive the .dat files while running and learn the field order from replays that have both — not started, needs go-ahead
+
+- [ ] Performance: 3D cache files are 35-110 MB per map on disk (and would be traffic for the web viewer) — store objects indexed + quantised and compress better; serve lower ground mips to the web build; keep building geometry as is (user: geometry is ok)
+- [ ] Display settings panel: redesigned as one table (setting | 2D | 3D, On/Off chips) — user to check
+
+
+- [ ] (On hold — user chose simple, non-repeating textures) 3D object textures as the game's real look, baked: per model, combine its actual material textures the way the
+      game shader does (PBS_tiled: tiles 0-2 mixed by the model's blendMask, each x its g_tileNTint, + dirt map;
+      PBS_tiled_atlas_global (rocks): atlas tiles by g_atlasIndexes mixed by atlasBlend + globalTex; classic: diffuseMap),
+      bake into one texture per model, then simplify the mesh keeping UVs. No stand-in tile textures (user, general rule)
+- [ ] Live Oaks: some buildings still missing — NOT the game-mode mask (checked: bit N = gameplay N is right; Live Oaks has
+      separate Standard-only / all-but-Standard building sets). Find what is missing with the user (which buildings / mode)
+
+#### Server (wot.arne.my)
+Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
+- [ ] Deploy to wot.arne.my (`docker compose up -d --build` on a host with Docker; DNS to that host) — needs the user's server.
+      Until then uploads from the app fail with a network error (uploading is off by default)
+- [ ] Docker image: not built yet (no Docker on the dev PC); the CI workflow builds it on every push
+- [ ] Smaller web bundle (1.4 MB gzipped now; wasm-opt runs in the Docker build; maybe Brotli)
+- [ ] Web 3D: map packs are 5-15 MB (big Steel Hunter maps ~30 MB) — could go lower (1024 px ground, per-vertex UVs)
+
+#### CI
+- [ ] `.github/workflows/build.yml` (Windows/Linux/macOS x64 + arm64 desktop builds, server tests, wasm build, Docker image) — written,
+      runs once the code is pushed; not run yet
+
+### Done
+- Project: renamed to LiveReplay; all upstream (GPL-3.0) code and text replaced (app, scanner, settings, launcher, tank names
+  from the client, README, icon, CI); licence CC BY-NC-SA 4.0; published as a fresh repository with a clean history:
+  https://github.com/Windows200000/LiveReplay
+- Icon: own design (minimap grid, green view-range ring, play triangle, red live dot), drawn by `examples/makeicon.rs`;
+  exe icon, window icon and website favicon
+- GDPR: privacy policy at `/privacy` (controller and contact from the server settings; what is stored and not; legal bases:
+  consent for uploaders, legitimate interest for other players; retention; rights); consent dialog before the first upload
+  (replay or live); Settings: privacy link, "Download my server data" (JSON to Downloads), "Delete all my data on the server"
+  (asks twice); right-click a replay > "Delete from server"; operator removal of every battle with a player's name
+  (admin token); expired codes deleted; no IP logging (Caddy without access log). Full battle results kept (user: don't trim stats)
+- Share links: right-click the map (2D, or 3D off a tank) > "Copy link to this moment and view" — time, 2D/3D, selected tank,
+  followed tank, 3D camera (`?t=&v=3d&sel=&follow=&cam=`); web viewer and uploaded replays in the desktop app ("Copy link" button on the web too)
+- Merged viewpoints: the server groups uploads of the same battle (same realm, map and day, 3+ shared tank ids); the web viewer
+  shows "Also recorded by:" toggles and merges them (aligned on battle start; a tank counts as seen if anyone saw it; one yellow
+  view-range circle per uploader; `vp=` in links)
+- 3D in the browser: the desktop app uploads compact 3D packs after a battle (never while playing): terrain, map objects for the
+  mode, tanks, map-event prefabs — geometry quantised + delta-coded, ground 2048 px, object textures 64 px per tile
+  (35-110 MB on desktop -> 5-15 MB per map, ~23 KB per tank); loaded only when 3D is switched on
+- Server abuse limits: battles per key per day (300), storage per key (2 GB) and in total (50 GB), player names per key (10); env-overridable
+- Stored data stays readable when fields change: frames and packs are format byte + deflate(CBOR, fields by name) (+2.5% size)
+- Web viewer: loading progress ("waiting for: ...") and readable errors instead of an endless spinner
+- Server (`server/`, Docker + Caddy for HTTPS): small Rust binary, no database server, no game code. Stores battles as the
+  desktop client sends them, serves them as is (finished battles immutable + cached forever), JSON lists gzipped, web files compressed once at startup
+- Compact battle format (`src/replay/wire.rs`): tracks quantised (cm, ms, 1e-4 rad) and delta-coded, deflated —
+  e.g. a 2.2 MB replay -> 325 KB; live battles grow by small frames (only new data + 2 s overlap)
+- Map data for the web viewer (map definition + the game's own minimap DDS, ~110 KB per map) and stat icons are uploaded by
+  clients once per map/client version from their own game files — nothing from the game is in the repository or image
+- Desktop: "Upload the battles I play, live" (Settings, off by default): sent every 4 s while playing, replaced by the full
+  replay (with results) when the battle ends. Past replays: right-click > Upload / Upload all shown; "Copy web link"
+- Live viewing codes: made in the desktop app (1 day / 1 week / 1 month), shown with copy/revoke. The server keeps only a hash
+  of each code; a code unlocks the live battles of the key that made it. Without a code a live battle is invisible (list and data);
+  once finished it is public. The browser remembers entered codes and forgets expired/revoked ones
+- Web viewer (`web/`, the desktop viewer compiled to WebAssembly): battle list (newest first, player filter, pages),
+  live battles for your codes (updates every 3 s, switches to the full replay when it ends), viewer at `/b/<id>`,
+  "Copy link to this moment" (`?t=` seconds after battle start)
+- First upload for a player name claims it for that PC's key (others can't upload as that player)
+- Test tools: `livereplay --upload <files>` (no window, prints links; `LIVEREPLAY_SERVER` for a test server),
+  `--settings`, `--link "<share link options>"`, `examples/fakelive.rs` (plays a replay to a server as a live battle),
+  `examples/fakeview.rs` (second viewpoint of a battle), `examples/wiresize.rs`, `examples/webpacksize.rs`, `examples/wirecheck.rs`
+- 3D performance: map objects drawn indexed with shared vertices, 28 bytes/vertex (no stored normals: flat shading from screen-space derivatives) — about 5x less GPU memory (e.g. Ruinberg 123 MB -> ~23 MB, Steel Hunter city 509 -> ~96 MB)
+- Mode column names from the client's own texts (`#menu:bonusType/N`, `#arenas:type/<mode>/name`): e.g. type 20 = "Skirmish · Encounter"; built-in table only as fallback
+- Max HP of tanks the replay hasn't described yet (enemies known from info records): hull + strongest turret from the client's vehicle data
+- Battle-wide tank state decoded from the state-update packets (type 0x37), matched by structure so it works across client builds: kill records (victim, killer; checked against 1567 deaths in 150 replays, 0 wrong outside Steel Hunter) and enemy info records (id, player name, tank; first spotting by anyone). Live battles now show every death, also out of view, and every enemy once spotted by anyone (skirmishes); finished replays also fall back to the results block
+- Finished replays: deaths the stream never showed (out of view) come from the results block (lifetime, killer)
+- Bases: white capture circle in 2D and on the 3D ground (radius estimated per battle from when tanks entered it, 50 m default); while capped it tints in the capturing team's colour with a progress arc, and an in-game style bar shows under the top bar (team-coloured progress, tank + number of cappers, "Base capture (37)", time left); blocked captures (both teams inside) show greyed as "Capture blocked (37)" with the defenders' count
+- 3D: click or drag on the corner minimap to move the camera there; the minimap shows the camera as a translucent white dot with a view cone
+- 3D: follow a tank (right-click it, or "Follow tank" in its stats panel); panning the camera stops following
+- Own replay parser in Rust (decrypt, defs from installed client, pickle)
+- In-game style 2D minimap: real minimap texture, grid, bases/flags, numbered spawn diamonds, correct battle clock
+- Vector class markers (crisp), in-game colours; despotted = faded but filled (keeps last-seen HP); dead = grey
+- Labels: player / tank name checkboxes (player on top); HP ring setting; HP text above marker
+- Hover stats up to that moment; click to pin (follows tank, click elsewhere closes); tomato.gg link
+- Card-style stats panel in a clean tomato.gg-like look (own design, nothing taken from it), stats with the client's own battle-result icons (loaded at runtime)
+- Shots (fading lines), white hit flash, stacking/fading damage numbers
+- Own tank drawn like others + white ring in 2D and 3D, never faded as "out of view"; yellow 564 m circle (2D and painted on the ground in 3D)
+- Live battle mode (temp.wotreplay), half-finished replays
+- Replay list: sorting, Mode column, row/cell hover, right-click filter/sort, column filters (value lists, date calendar with range drag, damage range slider + manual entry), select anywhere
+- Team side panels: alive first, then class; dead greyed with empty HP bar; hover highlight synced with map
+- In-game top bar: HP difference, team HP bars, score, class icons (dead dimmed); 2D above, 3D overlaid
+- 3D view (toggle, lightweight when off): cached simplified terrain/tanks/buildings, game-mode object masks (e.g. Steppes' extra hills/rocks from other modes),
+  flat translucent blue water planes, detailed baked ground texture, tilted hulls, smooth turret traverse, corner minimap,
+  left-drag rotate / right-drag move / wheel zoom
+- Random events (only WG random events, not player-destroyed objects): announcement read from `onRandomEvent`; danger-zone
+  minimap layer from the announcement until it happens, then the aftermath layer (variant nearest the event); 3D states
+  switch at the exact time; pre-placed wrecks (Himmelsdorf train) hidden until the crash, never shown if it didn't happen.
+  Verified on Ruinberg (bombing) and Himmelsdorf (airship, train)
+- UI scale presets (the old slider rescaled itself while dragging), dark theme
+- Live battle button in the replay list; viewer "Go live" follow mode
+- 3D cache re-parses automatically after a game update (keyed by client version + format)
+- 3D: terrain cropped to the battle area (no stretched map edges); Lost City sandstorm streaks removed
+- 3D markers share all 2D marker options (HP ring/text, labels, damage numbers, hit flash, own-tank ring)
+- Enemy colour red instead of purple; HP text off / current / max / current-of-max; map brightness per view
+- Settings window close button fixed; README credits for referenced projects
+- Buildings/objects textured through a per-map texture atlas (model UVs); rocks use their tiled-atlas base texture
+- Ground = the client's pre-blended full-res `global_AM` image (no custom bake)
+- Terrain handles 129-sample chunks (Westfeld etc. were stair-stepped)
+- Display menu: toggle buttons, separate 2D and 3D settings
+- Top bar in the in-game layout (HP bars + numbers by the score, class icons below, alive first, HP diff far left), scaled to the view so every icon fits
+- Small windows: team lists capped at 25% width with truncated names, map keeps the space
+- Shots start at the real muzzle, follow the exact ballistic arc (tracer velocity + gravity; arty arcs), end at the recorded impact point on the tank/ground
+- 3D hulls use the replay's recorded yaw/pitch/roll (tanks on their side show correctly); terrain slope only as fallback
+- 3D gun elevation from `gunAnglesPacked`, calibrated per tank from its shots (~0.5° error); shot lines start at the barrel tip
+- 3D ground: one baked image per map (map colour + ground-texture detail, up to 8192 px / 8 px per m), DXT1 with
+  mips, uploaded compressed; building textures 256 px per texture in a right-sized atlas
+- 3D "Textures" toggle: off = grey ground/objects, faint blue water
+- Stats icons: the client's ring-style statistic icons (prebattle highlights)
+- Old 3D cache folders (previous game versions / formats) are deleted automatically
+- Stats icons: the client's glowing battle-efficiency icons, recoloured per stat (damage/assist/spotted/shots green,
+  kills red, received orange crosshair, shots seen green shell, blocked blue, XP yellow, lifetime grey); drawn icons get a matching glow
+- Shots drawn like the game: leave the barrel tip on a ballistic arc (real gravity, reference flight time) fitted to
+  land exactly on the recorded impact point (2D and 3D)
+- Replay filters: click-only-this when all shown, empty = all, search focused when a menu opens
+- Test flag `--pin` (own stats panel pinned at start)
+- Simple non-repeating textures (user's choice): ground = game ground textures mixed by the real blend weights, filtered, sampled twice at different scale/rotation (no tile grid), large-scale colour from the overview; every object textured from the game (classic / tiled / atlas materials, plain .dds atlases too)
+- Rocks (all maps): atlas files indexed, plain atlas images cropped to their first tile, stone texture projected by world position, coloured by the overview, baked random brightness variation + darker down/side faces as fake detail shading
+- 3D ground baked like the terrain shader: per-chunk blend weights (`terrain2/blend_textures`) mix each ground texture with its own projection (`terrain2/layers`); overview colour only as fallback
+- Replay list headers aligned with columns, funnel filter icon (user confirmed)
+- 3D textures for tiled PBS materials (most buildings: `albedoHeightTile0`); invisible collision shapes (`s_` without shader) no longer drawn
+- Test flags: `--2d`, `--play` (plus existing `--at`, `--3d`, `--look`)
+
+## Credits
+
+* Built with `egui` and `eframe`
+* Replay decoding (`src/replay`) and game-file readers (`src/gamedata`) are written for this project. No code was copied. The following projects were used as references for the file formats:
+  * [Monstrofil/replays_unpack](https://github.com/Monstrofil/replays_unpack): replay encryption, packet layout and the BigWorld entity-definition ordering rules
+  * [rajesh-rahul/wot-battle-results-parser](https://github.com/rajesh-rahul/wot-battle-results-parser) (MIT): packet notes and method-ID mapping approach
+  * The community `XmlUnpacker` scripts for the BigWorld packed-XML format
+* Created by the community, for the community
+
+## Licence
+
+LiveReplay is licensed under [CC BY-NC-SA 4.0](LICENSE) (attribution, non-commercial, share-alike).
