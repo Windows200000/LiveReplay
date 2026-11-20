@@ -136,7 +136,7 @@ Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
 - Project: renamed to LiveReplay; all upstream (GPL-3.0) code and text replaced (app, scanner, settings, launcher, tank names
   from the client, README, icon, CI); licence CC BY-NC-SA 4.0; published as a fresh repository with a clean history:
   https://github.com/Windows200000/LiveReplay
-- Icon: own design (minimap grid, green view-range ring, play triangle, red live dot), drawn by `examples/makeicon.rs`;
+- Icon: own drawing in the style of the classic World of Tanks replays icon (metal shield with a T emblem, film strip) plus a red LIVE badge, drawn by `examples/makeicon.rs`;
   exe icon, window icon and website favicon
 - GDPR: privacy policy at `/privacy` (controller and contact from the server settings; what is stored and not; legal bases:
   consent for uploaders, legitimate interest for other players; retention; rights); consent dialog before the first upload
