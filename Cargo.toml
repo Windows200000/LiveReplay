@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "livereplay"
-version = "0.3.0"
+version = "1.0.0"
 edition = "2021"
 description = "World of Tanks replay viewer: in-game style 2D minimap and simplified 3D, live battles, replay library"
 license = "CC-BY-NC-SA-4.0"

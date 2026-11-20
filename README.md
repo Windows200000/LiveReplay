@@ -5,7 +5,7 @@
 Watch World of Tanks battles on an in-game style minimap or in a simplified 3D view: your saved replays, the battle you
 are playing right now, and other players' battles in the browser.
 
-Website: **https://wot.arne.my** · Latest Windows build: [Releases](https://github.com/Windows200000/LiveReplay/releases/tag/latest-build)
+Website: **https://wot.arne.my** · Download: [latest release](https://github.com/Windows200000/LiveReplay/releases/latest) · [newest build](https://github.com/Windows200000/LiveReplay/releases/tag/latest-build)
 
 > LiveReplay is a fan project and is not affiliated with or endorsed by Wargaming. World of Tanks is a trademark of
 > Wargaming. Nothing from the game is part of this repository: maps, models, textures, icons and game definitions are read
@@ -43,8 +43,9 @@ Website: **https://wot.arne.my** · Latest Windows build: [Releases](https://git
 
 ## Download and use
 
-1. Download `livereplay-windows-x64.exe` from the [latest build](https://github.com/Windows200000/LiveReplay/releases/tag/latest-build)
-   and run it. The game folder is found automatically (otherwise set it in Settings).
+1. Download the file for your system from the [latest release](https://github.com/Windows200000/LiveReplay/releases/latest)
+   (Windows: `livereplay-windows-x64.exe` / `-arm64.exe`; Linux and macOS: `.tar.gz`, x64 or arm64) and run it.
+   The [newest build](https://github.com/Windows200000/LiveReplay/releases/tag/latest-build) follows every change. The game folder is found automatically (otherwise set it in Settings).
 2. Double-click a replay, or press **Live battle** while playing (replay recording must be on in the game settings).
 3. To put battles on the website: Settings > Server, or right-click replays > Upload. Uploading is off until you agree.
 
@@ -90,8 +91,8 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 - Nothing from World of Tanks (textures, models, icons, defs) is ever committed — everything is read from the user's own client at runtime.
 - Keep it lean: no whole other repos; only inspiration or licence-compatible snippets, credited in the README.
 - After every new build, launch the new exe for the user (keep the current build running).
-- After every new build, upload it to the rolling GitHub pre-release `latest-build` (only the newest build):
-  https://github.com/Windows200000/LiveReplay/releases/tag/latest-build
+- Every push to main publishes all six desktop builds to the rolling pre-release `latest-build` (CI `publish` job;
+  https://github.com/Windows200000/LiveReplay/releases/tag/latest-build). A `v*` tag makes a versioned release.
 - Finish the client before the server.
 - Keep this roadmap (in README.md) complete and current at all times, with every request the user made in the session (also those from before context compaction); work through it without stopping until done.
 
@@ -107,6 +108,10 @@ Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
       Until then uploads from the app fail with a network error (uploading is off by default)
 
 ### Done
+- Release 1.0.0; CI publishes all six desktop builds (Windows/Linux/macOS, x64 + arm64) to `latest-build` on every push,
+  and a versioned release for each `v*` tag
+- The battle in progress is read from its packets (the game writes no header until the end): LIVE row and live upload work
+- Roadmap: the on-hold baked material textures dropped (user)
 - 2D map zoom: mouse wheel zooms around the pointer (up to 10x), right- or middle-drag pans, double-click resets; grid labels,
   markers, labels, bases and circles follow (also the 3D view's corner minimap)
 - Replay list: the battle being played shows as a highlighted LIVE row at the top (player, tank, map, mode); click to watch it live

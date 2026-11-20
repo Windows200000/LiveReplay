@@ -1,6 +1,6 @@
 [package]
 name = "livereplay-web"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "LiveReplay web viewer (WebAssembly)"
 license = "CC-BY-NC-SA-4.0"

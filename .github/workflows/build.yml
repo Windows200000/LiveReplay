@@ -1,10 +1,13 @@
 # Builds the desktop app for Windows, Linux and macOS (x64 + arm64), checks the server and web
 # viewer, and builds the Docker image. Artifacts: one desktop binary per platform.
+# Publishing: every push to main replaces the files of the `latest-build` pre-release; a `v*` tag
+# creates a release with the same files.
 name: build
 
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -56,3 +59,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t livereplay-server .
+
+  publish:
+    needs: [desktop, server-and-web, docker]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Package (Windows: .exe; Linux/macOS: .tar.gz keeping the executable bit)
+        run: |
+          mkdir dist
+          for d in artifacts/livereplay-*; do
+            name=$(basename "$d")
+            if [ -f "$d/livereplay.exe" ]; then
+              cp "$d/livereplay.exe" "dist/$name.exe"
+            else
+              chmod +x "$d/livereplay"
+              tar -czf "dist/$name.tar.gz" -C "$d" livereplay
+            fi
+          done
+          ls -l dist
+      - name: latest-build pre-release
+        if: github.ref == 'refs/heads/main'
+        run: |
+          short=${GITHUB_SHA::7}
+          gh api -X PATCH "repos/$GH_REPO/git/refs/tags/latest-build" -f sha="$GITHUB_SHA" -F force=true
+          gh release upload latest-build dist/* --clobber
+          gh release edit latest-build --prerelease --title "Latest build" --notes "Latest build of LiveReplay, commit $short. Replaced with every push to main. Windows: .exe; Linux and macOS: .tar.gz (the app inside is unsigned — on macOS right-click → Open the first time). Third-party licences: THIRD_PARTY_LICENSES.md."
+      - name: Versioned release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --title "LiveReplay ${GITHUB_REF_NAME#v}" --notes "LiveReplay ${GITHUB_REF_NAME#v}. Windows: .exe; Linux and macOS: .tar.gz (the app inside is unsigned — on macOS right-click → Open the first time). Third-party licences: THIRD_PARTY_LICENSES.md." --latest
