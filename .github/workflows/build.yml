@@ -73,7 +73,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: Package (Windows: .exe; Linux/macOS: .tar.gz keeping the executable bit)
+      - name: "Package: Windows .exe, Linux/macOS .tar.gz (keeps the executable bit)"
         run: |
           mkdir dist
           for d in artifacts/livereplay-*; do
