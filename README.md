@@ -97,7 +97,6 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 ### Open
 
 #### Viewer
-- [ ] Live Oaks lake buildings: fisher houses on stilts, piers and the floating shop render in the current build — waiting for the user to confirm
 
 
 - [ ] Display settings panel: redesigned as one table (setting | 2D | 3D, On/Off chips) — user to check
@@ -107,8 +106,6 @@ What's planned, what's done, and the project rules. Kept up to date with every c
       game shader does (PBS_tiled: tiles 0-2 mixed by the model's blendMask, each x its g_tileNTint, + dirt map;
       PBS_tiled_atlas_global (rocks): atlas tiles by g_atlasIndexes mixed by atlasBlend + globalTex; classic: diffuseMap),
       bake into one texture per model, then simplify the mesh keeping UVs. No stand-in tile textures (user, general rule)
-- [ ] Live Oaks: some buildings still missing — NOT the game-mode mask (checked: bit N = gameplay N is right; Live Oaks has
-      separate Standard-only / all-but-Standard building sets). Find what is missing with the user (which buildings / mode)
 
 #### Server (wot.arne.my)
 Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
@@ -118,6 +115,10 @@ Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
 - [ ] Web 3D: map packs are 5-15 MB (big Steel Hunter maps ~30 MB) — could go lower (1024 px ground, per-vertex UVs)
 
 ### Done
+- Live Oaks (and all maps): game-mode object masks verified against the bases (Standard's two team-base objects carry only the
+  Standard bit, Encounter/Assault bases only theirs), so the town houses marked "all modes except Standard" are correctly absent in
+  Standard battles; smaller cover objects (cars, walls, boats, kiosks: Environment objects from 5 m instead of 8 m) are now shown
+  on every map (+11-13% triangles)
 - CI (`.github/workflows/build.yml`): desktop builds + tests on Windows/Linux/macOS x64 and arm64 (binaries as artifacts),
   server tests, wasm build and the Docker image on every push to main — Docker image, server, web, Linux and Windows jobs pass
 - Replays left before the battle ended get their results: the app archives the game's cached battle results

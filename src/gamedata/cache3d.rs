@@ -14,7 +14,7 @@ use super::models::{parse_chunk_heights, parse_primitives, parse_sections, Mesh}
 use super::pkg::Pkg;
 use super::GameData;
 
-const FORMAT: u32 = 17;
+const FORMAT: u32 = 18;
 /// Keep every 4th height sample: 65 samples / 100 m -> 17 samples (6.25 m spacing).
 const TERRAIN_STEP: usize = 4;
 
@@ -135,7 +135,7 @@ fn keep_object(path: &str, size: f32) -> bool {
     let category = path.split('/').nth(1).unwrap_or("");
     match category {
         "GatesAndFences" | "Decor" | "Outland" | "misc" | "Vegetation" | "Flora" | "Particles" | "content_deferred" => false,
-        "Environment" | "Nature" => size >= 8.0 && size < 400.0,
+        "Environment" | "Nature" => size >= 5.0 && size < 400.0,
         _ => size >= 3.0 && size < 400.0,
     }
 }
