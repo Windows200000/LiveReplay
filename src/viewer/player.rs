@@ -1019,6 +1019,10 @@ impl ReplayViewer {
             if let (Some([x, z]), Some(v)) = (mini.clicked_world, loaded.view3d.as_mut()) {
                 v.look_at(x, z);
             }
+            // Right-click a tank on the corner minimap: the 3D camera follows it (like in 3D).
+            if let (Some(id), Some(v)) = (mini.follow_unit, loaded.view3d.as_mut()) {
+                v.set_follow(Some(id));
+            }
             out.hovered = mini.hovered.or(out.hovered);
             out.clicked_unit = mini.clicked_unit.or(out.clicked_unit);
             out.clicked_empty |= mini.clicked_empty;
@@ -1217,7 +1221,7 @@ fn stats_panel(ui: &mut egui::Ui, icons: &super::theme::IconTextures, b: &Battle
         if ui.add(egui::Button::new(if on { "Following — click to stop" } else { "Follow tank" }).selected(on)).clicked() {
             return PanelAction::ToggleFollow;
         }
-        ui.label(RichText::new("Tip: right-click a tank to follow it; panning the camera stops following.").small().color(Color32::from_gray(140)));
+        ui.label(RichText::new("Tip: right-click a tank (also on the minimap) to follow it; panning the camera stops following.").small().color(Color32::from_gray(140)));
     }
     if close {
         PanelAction::Close

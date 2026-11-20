@@ -61,13 +61,24 @@ pub fn encode_mesh(m: &Mesh) -> Vec<u8> {
     for c in &m.colors {
         b.extend_from_slice(c);
     }
+    // Per corner: 0 = the UV this vertex had last time, else 1 + delta to the previous explicit UV.
     put_varint(&mut b, m.corner_uv.len() as i64);
     let mut pu = [0i64; 2];
-    for uv in &m.corner_uv {
+    let mut last: Vec<Option<[i64; 2]>> = vec![None; m.positions.len()];
+    for (c, uv) in m.corner_uv.iter().enumerate() {
+        let v = [q(uv[0], UV), q(uv[1], UV)];
+        let vi = m.indices.get(c).map(|&i| i as usize).filter(|&i| i < last.len());
+        if vi.is_some_and(|i| last[i] == Some(v)) {
+            put_varint(&mut b, 0);
+            continue;
+        }
+        put_varint(&mut b, 1);
         for k in 0..2 {
-            let v = q(uv[k], UV);
-            put_varint(&mut b, v - pu[k]);
-            pu[k] = v;
+            put_varint(&mut b, v[k] - pu[k]);
+        }
+        pu = v;
+        if let Some(i) = vi {
+            last[i] = Some(v);
         }
     }
     put_varint(&mut b, m.tri_tex.len() as i64);
@@ -104,11 +115,21 @@ pub fn decode_mesh(b: &[u8]) -> Option<Mesh> {
     let nu = n(&mut at)?;
     let mut corner_uv = Vec::with_capacity(nu.min(1 << 26));
     let mut pu = [0i64; 2];
-    for _ in 0..nu {
-        for p in pu.iter_mut() {
-            *p += get_varint(b, &mut at)?;
-        }
-        corner_uv.push(pu.map(|v| v as f32 / UV));
+    let mut last: Vec<[i64; 2]> = vec![[0, 0]; positions.len()];
+    for c in 0..nu {
+        let vi = indices.get(c).map(|&i| i as usize).filter(|&i| i < last.len());
+        let v = if get_varint(b, &mut at)? == 0 {
+            last[vi?]
+        } else {
+            for p in pu.iter_mut() {
+                *p += get_varint(b, &mut at)?;
+            }
+            if let Some(i) = vi {
+                last[i] = pu;
+            }
+            pu
+        };
+        corner_uv.push(v.map(|v| v as f32 / UV));
     }
     let nt = n(&mut at)?;
     let mut tri_tex = Vec::with_capacity(nt.min(1 << 24));
@@ -244,4 +265,30 @@ pub fn tank_asset(vehicle_type: &str) -> String {
 }
 pub fn prefab_asset(name: &str) -> String {
     format!("pf-{}", &crate::net::sha256_hex(name.as_bytes())[..20])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mesh_roundtrip() {
+        let m = Mesh {
+            positions: vec![[0.0, 1.0, 2.0], [10.5, -3.25, 7.0], [4.0, 4.0, 4.0], [1.0, 2.0, 3.0]],
+            indices: vec![0, 1, 2, 2, 1, 3, 0, 1, 3],
+            colors: vec![[1, 2, 3], [4, 5, 6], [7, 8, 9], [9, 9, 9]],
+            corner_uv: vec![[0.0, 0.0], [1.0, 0.0], [0.5, 1.0], [0.5, 1.0], [1.0, 0.0], [2.0, 2.0], [0.25, 0.0], [1.0, 0.0], [2.0, 2.0]],
+            tri_tex: vec![3, 3, 7],
+        };
+        let d = decode_mesh(&encode_mesh(&m)).unwrap();
+        assert_eq!(d.indices, m.indices);
+        assert_eq!(d.colors, m.colors);
+        assert_eq!(d.tri_tex, m.tri_tex);
+        for (a, b) in d.corner_uv.iter().zip(&m.corner_uv) {
+            assert!((a[0] - b[0]).abs() < 0.001 && (a[1] - b[1]).abs() < 0.001);
+        }
+        for (a, b) in d.positions.iter().zip(&m.positions) {
+            assert!((a[0] - b[0]).abs() < 0.006);
+        }
+    }
 }

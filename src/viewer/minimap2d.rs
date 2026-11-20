@@ -65,6 +65,8 @@ pub struct ViewOutput {
     pub clicked_world: Option<[f32; 2]>,
     /// Right-click on the map (not on a tank in 3D): where to open the map's menu.
     pub context_at: Option<Pos2>,
+    /// Right-click on a tank (the 3D view's corner minimap follows it).
+    pub follow_unit: Option<i32>,
     /// Screen position of each drawn unit, used to attach popups.
     pub anchors: HashMap<i32, Pos2>,
     pub rect: Rect,
@@ -420,7 +422,7 @@ impl BattleView for Minimap2D {
 
         // Units
         let icon_r = (side * 0.0135).max(5.5) * st.marker_scale; // diamond half-diagonal
-        let mut out = ViewOutput { hovered: None, clicked_unit: None, clicked_empty: false, clicked_world: None, context_at: None, anchors: HashMap::new(), rect };
+        let mut out = ViewOutput { hovered: None, clicked_unit: None, clicked_empty: false, clicked_world: None, context_at: None, follow_unit: None, anchors: HashMap::new(), rect };
         let pointer = response.hover_pos();
         let mut best: Option<(f32, i32)> = None;
         let label_font = FontId::proportional((side * 0.0145).clamp(10.0, 18.0) * st.marker_scale.sqrt());
@@ -468,6 +470,7 @@ impl BattleView for Minimap2D {
         }
         if response.secondary_clicked() {
             out.context_at = response.interact_pointer_pos();
+            out.follow_unit = out.hovered;
         }
         out
     }

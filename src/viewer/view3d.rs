@@ -849,7 +849,7 @@ impl BattleView for View3D {
 
         // Markers above the tanks: same drawing (and settings) as the 2D minimap.
         let painter = ui.painter_at(rect);
-        let mut out = ViewOutput { hovered: None, clicked_unit: None, clicked_empty: false, clicked_world: None, context_at: None, anchors: HashMap::new(), rect };
+        let mut out = ViewOutput { hovered: None, clicked_unit: None, clicked_empty: false, clicked_world: None, context_at: None, follow_unit: None, anchors: HashMap::new(), rect };
         let pointer = response.hover_pos();
         let mut best: Option<(f32, i32)> = None;
         let icon_r = 7.0 * st.marker_scale;

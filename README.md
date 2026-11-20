@@ -111,10 +111,12 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
 - [ ] Deploy to wot.arne.my (`docker compose up -d --build` on a host with Docker; DNS to that host) — needs the user's server.
       Until then uploads from the app fail with a network error (uploading is off by default)
-- [ ] Smaller web bundle (1.4 MB gzipped now; wasm-opt runs in the Docker build; maybe Brotli)
-- [ ] Web 3D: map packs are 5-15 MB (big Steel Hunter maps ~30 MB) — could go lower (1024 px ground, per-vertex UVs)
+- [ ] Smaller web bundle: 1.4 MB gzipped before wasm-opt (the Docker build runs wasm-opt -Oz); next steps if needed: Brotli, fewer egui fonts
 
 ### Done
+- 3D: right-click a tank on the corner minimap to follow it (like right-clicking it in the 3D view)
+- Smaller geometry for the 3D cache and web packs: a triangle corner reuses its vertex's last texture coordinate with a one-byte
+  flag (UVs were 2/3 of the data): Mines web pack 9.1 -> 7.5 MB (with the extra cover objects: 9.0 MB)
 - Live Oaks (and all maps): game-mode object masks verified against the bases (Standard's two team-base objects carry only the
   Standard bit, Encounter/Assault bases only theirs), so the town houses marked "all modes except Standard" are correctly absent in
   Standard battles; smaller cover objects (cars, walls, boats, kiosks: Environment objects from 5 m instead of 8 m) are now shown
