@@ -43,6 +43,9 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |_cc| {
             let mut app = App::default();
+            if let Some(dir) = arg_after(&args, "--replays") {
+                app.watch_replays_dir(dir);
+            }
             if args.iter().any(|a| a == "--live") {
                 app.open_live();
             } else if let Some(file) = args.iter().find(|a| a.ends_with(".wotreplay")) {

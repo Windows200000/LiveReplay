@@ -78,6 +78,68 @@ pub fn mode_label(bonus_type: i64, gameplay: &str, game: Option<&GameData>) -> S
 }
 
 /// Read the summary of one replay (start block, plus the results block for damage if present).
+/// Summary of the battle being played (`temp.wotreplay` has no JSON header yet): taken from the
+/// parsed packets; the date is when the game created the file (the battle's start).
+pub fn live_entry(path: &Path, b: &crate::replay::battle::Battle, game: &GameData) -> ReplayEntry {
+    let me = b.recorder_vehicle.and_then(|id| b.vehicles.get(&id));
+    let started = std::fs::metadata(path).and_then(|m| m.created().or_else(|_| m.modified())).unwrap_or_else(|_| std::time::SystemTime::now());
+    ReplayEntry {
+        path: path.to_string_lossy().into_owned(),
+        player_name: b.player_name.clone(),
+        tank: me.map(|v| v.tank_name.clone()).unwrap_or_default(),
+        map: b.map_display.clone(),
+        mode: mode_label(b.battle_type, &b.gameplay, Some(game)),
+        date: local_date(started),
+        damage: 0,
+        server: b.server_realm.clone(),
+        version: game.client_version(),
+    }
+}
+
+/// "dd.mm.yyyy hh:mm:ss" in local time, like the game writes it.
+fn local_date(t: std::time::SystemTime) -> String {
+    let secs = t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0) + local_offset_secs();
+    let (days, s) = (secs.div_euclid(86400), secs.rem_euclid(86400));
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{d:02}.{m:02}.{y} {:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+}
+
+#[cfg(windows)]
+fn local_offset_secs() -> i64 {
+    #[repr(C)]
+    struct TimeZoneInformation {
+        bias: i32,
+        standard_name: [u16; 32],
+        standard_date: [u16; 8],
+        standard_bias: i32,
+        daylight_name: [u16; 32],
+        daylight_date: [u16; 8],
+        daylight_bias: i32,
+    }
+    extern "system" {
+        fn GetTimeZoneInformation(info: *mut TimeZoneInformation) -> u32;
+    }
+    // SAFETY: plain C struct filled in by kernel32.
+    let mut tz: TimeZoneInformation = unsafe { std::mem::zeroed() };
+    let r = unsafe { GetTimeZoneInformation(&mut tz) };
+    let bias = tz.bias + if r == 2 { tz.daylight_bias } else { tz.standard_bias };
+    -(bias as i64) * 60
+}
+
+#[cfg(not(windows))]
+fn local_offset_secs() -> i64 {
+    0
+}
+
 pub fn summarize(path: &Path, game: Option<&GameData>) -> Option<ReplayEntry> {
     let file = ReplayFile::open(path).ok()?;
     let info = file.start_info();

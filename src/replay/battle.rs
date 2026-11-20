@@ -541,6 +541,10 @@ impl Battle {
                         if b.gameplay.is_empty() {
                             b.gameplay = gameplay_name(arena_type >> 16).to_string();
                         }
+                        // arenaBonusType (the header's battleType; in-progress files have no header)
+                        if let (Some(bonus), 0) = (c.u8(), b.battle_type) {
+                            b.battle_type = bonus as i64;
+                        }
                     }
                 }
                 // Space / map: space id, arena id, u8 len + "spaces/<map>"

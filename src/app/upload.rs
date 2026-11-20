@@ -280,7 +280,7 @@ impl Worker {
     }
 
     fn new_battle(&self, engine: &Engine, path: &Path, b: &Battle, live: bool) -> Result<BattleInfo, String> {
-        let e = super::library::summarize(path, Some(&engine.game)).ok_or("not a replay")?;
+        let e = entry(engine, path, b).ok_or("not a replay")?;
         let nb = NewBattle {
             player: e.player_name,
             realm: b.server_realm.clone(),
@@ -391,7 +391,7 @@ impl Worker {
                 }
                 if self.current.as_ref().unwrap().id.is_none() {
                     let info = self.new_battle(&engine, &temp, &battle, true)?;
-                    let version = super::library::summarize(&temp, Some(&engine.game)).map(|e| e.version).unwrap_or_default();
+                    let version = entry(&engine, &temp, &battle).map(|e| e.version).unwrap_or_default();
                     self.ensure_assets(&engine, &battle.map, &version)?;
                     self.current.as_mut().unwrap().id = Some(info.id);
                 }
@@ -447,4 +447,9 @@ impl Worker {
 
 fn file_name(p: &Path) -> String {
     p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// The list summary of a replay, or of the battle in progress (no header yet).
+fn entry(engine: &Engine, path: &Path, b: &Battle) -> Option<super::library::ReplayEntry> {
+    super::library::summarize(path, Some(&engine.game)).or_else(|| b.live.then(|| super::library::live_entry(path, b, &engine.game)))
 }

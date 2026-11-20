@@ -206,6 +206,14 @@ impl GameData {
             .unwrap_or_else(|| "EU".into())
     }
 
+    /// Client version as replays write it ("World of Tanks v.2.4.1.1 #993").
+    pub fn client_version(&self) -> String {
+        std::fs::read_to_string(self.root.join("version.xml"))
+            .ok()
+            .and_then(|x| x.split("<version>").nth(1).and_then(|r| r.split("</version>").next()).map(|r| format!("World\u{a0}of\u{a0}Tanks {}", r.trim())))
+            .unwrap_or_default()
+    }
+
     pub fn arena(&self, map: &str) -> Option<ArenaDef> {
         let root = self.script_xml(&format!("scripts/arena_defs/{map}.xml"))?;
         let bb = root.child("boundingBox")?;

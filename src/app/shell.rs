@@ -38,7 +38,9 @@ pub struct App {
     /// UI scale on the replay list (shared with the viewer's setting).
     ui_scale: f32,
     /// The battle being played right now (`temp.wotreplay`): its size when read, and its summary.
-    in_progress: Option<(u64, ReplayEntry)>,
+    /// Filled by a background thread (reading it needs the game data).
+    in_progress: Arc<std::sync::Mutex<Option<(u64, ReplayEntry)>>>,
+    in_progress_loading: Arc<std::sync::atomic::AtomicBool>,
     in_progress_checked: f64,
     /// The consent dialog is the first-start question.
     consent_first: bool,
@@ -72,7 +74,8 @@ impl Default for App {
             consent: first_ask.then(Vec::new),
             consent_first: first_ask,
             ui_scale: crate::viewer::settings::ViewerSettings::load().ui_scale,
-            in_progress: None,
+            in_progress: Default::default(),
+            in_progress_loading: Default::default(),
             in_progress_checked: -10.0,
             confirm_delete: false,
             cfg,
@@ -151,6 +154,11 @@ impl App {
         if let Some(v) = &mut self.viewer {
             v.apply_link(query);
         }
+    }
+
+    /// Look for the battle in progress in another folder (`--replays <dir>`, testing; not saved).
+    pub fn watch_replays_dir(&mut self, dir: String) {
+        self.cfg.replays_dir = dir;
     }
 
     /// Open the settings window (`--settings`, testing).
@@ -261,17 +269,34 @@ impl App {
             self.in_progress_checked = now;
             let path = PathBuf::from(&self.cfg.replays_dir).join("temp.wotreplay");
             let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let mut cur = self.in_progress.lock().unwrap();
             if len == 0 {
-                self.in_progress = None;
-            } else if self.in_progress.as_ref().map_or(true, |(l, _)| len < *l) {
-                self.in_progress = library::summarize(&path, self.engine.as_ref().map(|e| &e.game)).map(|e| (len, e));
-            } else if let Some((l, _)) = &mut self.in_progress {
+                *cur = None;
+            } else if cur.as_ref().map_or(true, |(l, _)| len < *l) {
+                use std::sync::atomic::Ordering;
+                if !self.in_progress_loading.swap(true, Ordering::SeqCst) {
+                    let (out, busy) = (self.in_progress.clone(), self.in_progress_loading.clone());
+                    let (engine, game_dir, ctx) = (self.engine.clone(), self.cfg.game_dir.clone(), ctx.clone());
+                    std::thread::spawn(move || {
+                        let entry = crate::viewer::player::native::get_engine(engine, &game_dir).ok().and_then(|e| {
+                            let b = crate::replay::battle::Battle::load(&path, &e.game, &e.defs).ok()?;
+                            Some(library::summarize(&path, Some(&e.game)).unwrap_or_else(|| library::live_entry(&path, &b, &e.game)))
+                        });
+                        if let Some(e) = entry.filter(|e| !e.player_name.is_empty()) {
+                            *out.lock().unwrap() = Some((len, e));
+                            ctx.request_repaint();
+                        }
+                        busy.store(false, Ordering::SeqCst);
+                    });
+                }
+            } else if let Some((l, _)) = cur.as_mut() {
                 *l = len;
             }
         }
         ctx.request_repaint_after(std::time::Duration::from_secs(2));
         let mut watch_live = false;
-        if let Some((_, e)) = &self.in_progress {
+        let in_progress = self.in_progress.lock().unwrap().as_ref().map(|(_, e)| e.clone());
+        if let Some(e) = &in_progress {
             egui::TopBottomPanel::top("in_progress").show(ctx, |ui| {
                 ui.add_space(4.0);
                 let red = Color32::from_rgb(255, 80, 70);
