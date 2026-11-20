@@ -404,7 +404,7 @@ impl App {
             ui.add_space(6.0);
             ui.label("Live viewing codes (let someone watch your battles while you play):");
             ui.horizontal(|ui| {
-                egui::ComboBox::from_id_source("code_days")
+                egui::ComboBox::from_id_salt("code_days")
                     .selected_text(match self.code_days { 1 => "1 day", 7 => "1 week", _ => "1 month" })
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut self.code_days, 1, "1 day");

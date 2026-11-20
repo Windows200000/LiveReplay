@@ -21,15 +21,12 @@ jobs:
           - { name: windows-arm64, os: windows-11-arm, bin: livereplay.exe }
           - { name: linux-x64, os: ubuntu-24.04, bin: livereplay }
           - { name: linux-arm64, os: ubuntu-24.04-arm, bin: livereplay }
-          - { name: macos-x64, os: macos-15-intel, bin: livereplay, rust: '1.89' }
-          - { name: macos-arm64, os: macos-15, bin: livereplay, rust: '1.89' }
+          - { name: macos-x64, os: macos-15-intel, bin: livereplay }
+          - { name: macos-arm64, os: macos-15, bin: livereplay }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      # macOS: eframe 0.28's objc2 0.4 doesn't build with the newest compilers (until the eframe upgrade).
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ matrix.rust || 'stable' }}
+      - uses: dtolnay/rust-toolchain@stable
       - name: Linux libraries (egui/winit)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libgtk-3-dev

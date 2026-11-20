@@ -259,7 +259,7 @@ fn toggle_row(ui: &mut egui::Ui, title: &str, vs: &mut super::settings::ViewSett
             HpText::Max => "HP text: max",
             HpText::CurrentOfMax => "HP text: cur / max",
         };
-        egui::ComboBox::from_id_source(("hp_text", is3d)).width(130.0).selected_text(RichText::new(name(vs.hp_text)).size(12.0)).show_ui(ui, |ui| {
+        egui::ComboBox::from_id_salt(("hp_text", is3d)).width(130.0).selected_text(RichText::new(name(vs.hp_text)).size(12.0)).show_ui(ui, |ui| {
             for m in [HpText::Off, HpText::Current, HpText::Max, HpText::CurrentOfMax] {
                 changed |= ui.selectable_value(&mut vs.hp_text, m, name(m)).changed();
             }
@@ -867,7 +867,7 @@ impl ReplayViewer {
                     }
                     self.playing = !self.playing;
                 }
-                egui::ComboBox::from_id_source("speed")
+                egui::ComboBox::from_id_salt("speed")
                     .selected_text(format!("{}x", self.settings.speed))
                     .width(60.0)
                     .show_ui(ui, |ui| {
@@ -1049,7 +1049,7 @@ impl ReplayViewer {
                     ui.painter().rect_filled(r.expand(2.0), 2.0, Color32::from_black_alpha(160));
                     let camera = loaded.view3d.as_ref().and_then(|v| v.camera_mark());
                     let input2d = ViewInput { settings: &self.settings.view2d, camera, ..input };
-                    ui.allocate_ui_at_rect(r, |ui| {
+                    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(r), |ui| {
                         out_mini = Some(loaded.view.show(ui, &input2d));
                     });
                 }

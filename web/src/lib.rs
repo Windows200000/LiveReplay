@@ -11,8 +11,16 @@ mod fetch;
 #[wasm_bindgen::prelude::wasm_bindgen(start)]
 pub fn start() {
     wasm_bindgen_futures::spawn_local(async {
+        use wasm_bindgen::JsCast;
         let options = eframe::WebOptions::default();
-        let r = eframe::WebRunner::new().start("livereplay", options, Box::new(|cc| Ok(Box::new(app::WebApp::new(cc))))).await;
+        let Some(canvas) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.get_element_by_id("livereplay"))
+            .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+        else {
+            return;
+        };
+        let r = eframe::WebRunner::new().start(canvas, options, Box::new(|cc| Ok(Box::new(app::WebApp::new(cc))))).await;
         if let Err(e) = r {
             web_sys::console::error_1(&e);
         }
