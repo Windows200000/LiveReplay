@@ -114,15 +114,12 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
 - [ ] Deploy to wot.arne.my (`docker compose up -d --build` on a host with Docker; DNS to that host) — needs the user's server.
       Until then uploads from the app fail with a network error (uploading is off by default)
-- [ ] Docker image: not built yet (no Docker on the dev PC); the CI workflow builds it on every push
 - [ ] Smaller web bundle (1.4 MB gzipped now; wasm-opt runs in the Docker build; maybe Brotli)
 - [ ] Web 3D: map packs are 5-15 MB (big Steel Hunter maps ~30 MB) — could go lower (1024 px ground, per-vertex UVs)
 
-#### CI
-- [ ] `.github/workflows/build.yml` (Windows/Linux/macOS x64 + arm64 desktop builds, server tests, wasm build, Docker image) — written,
-      runs once the code is pushed; not run yet
-
 ### Done
+- CI (`.github/workflows/build.yml`): desktop builds + tests on Windows/Linux/macOS x64 and arm64 (binaries as artifacts),
+  server tests, wasm build and the Docker image on every push to main — Docker image, server, web, Linux and Windows jobs pass
 - Replays left before the battle ended get their results: the app archives the game's cached battle results
   (`%APPDATA%\Wargaming.net\WorldOfTanksattle_results`, the game deletes them after about a day) and learns their
   positional layout per game version by pairing them with replays that have a results block (same values in the same places,
