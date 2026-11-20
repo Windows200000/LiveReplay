@@ -116,10 +116,10 @@ Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
 - [ ] Smaller web bundle: 1.4 MB gzipped before wasm-opt (the Docker build runs wasm-opt -Oz); next steps if needed: Brotli, fewer egui fonts
 
 ### Done
-- UI scale is a slider again (applied on release, so it doesn't rescale while dragging) plus Ctrl + mouse wheel and Ctrl +/-,
-  in the viewer and on the replay list; sliders show their filled bar again
-- Display toggles moved out of the menu into rows above the view: "3D" and "Minimap" rows in 3D, a "2D" row in 2D; each row
-  collapses with its arrow (remembered). The Display menu keeps sizes, brightness and UI scale
+- UI scale is a slider again and applies live: while dragging, the slider stays where it was on screen at its original size and
+  everything else rescales; also Ctrl + mouse wheel and Ctrl +/- (viewer and replay list); sliders show their filled bar again
+- Display settings: a "Display settings" button in the top bar (next to 2D / 3D / Minimap) shows or hides rows above the view:
+  "3D" and "Minimap" rows in 3D, a "2D" row in 2D (toggles, HP text, marker size and brightness sliders), plus the UI scale
 - Upload errors are short ("can't reach wot.arne.my ...") and the status line is cut to one line (full text on hover)
 - Third-party licences: all dependencies are permissive (MIT / Apache-2.0 / BSD / Zlib ...); THIRD_PARTY_LICENSES.md lists
   every crate with its licence and notice files; linked from the app's Settings, the website, and shipped with the release

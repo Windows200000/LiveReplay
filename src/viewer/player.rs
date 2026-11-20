@@ -150,44 +150,65 @@ fn capture_bar(painter: &egui::Painter, top: egui::Rect, captures: &[scene::Capt
 }
 
 /// On/off chip: highlighted when on (no tick boxes).
-/// The Display menu: sizes and brightness per view, and the UI scale.
-fn display_settings_ui(ui: &mut egui::Ui, s: &mut ViewerSettings) -> bool {
-    let mut changed = false;
-    egui::Grid::new("display_settings").num_columns(3).spacing([12.0, 8.0]).show(ui, |ui| {
-        ui.label("");
-        ui.label(RichText::new("2D").strong());
-        ui.label(RichText::new("3D").strong());
-        ui.end_row();
-        ui.spacing_mut().slider_width = 90.0;
-        ui.label("Marker size");
-        for vs in [&mut s.view2d, &mut s.view3d] {
-            changed |= ui.add(egui::Slider::new(&mut vs.marker_scale, 0.5..=2.0).show_value(false).trailing_fill(true)).changed();
+const SCALE_MIN: f32 = 0.5;
+const SCALE_MAX: f32 = 2.5;
+
+/// Rail, fill and handle of the UI-scale slider; `k` scales the drawing (1 = normal size).
+fn paint_scale_slider(p: &egui::Painter, r: egui::Rect, value: f32, k: f32, accent: Color32, rail: Color32) {
+    let t = ((value - SCALE_MIN) / (SCALE_MAX - SCALE_MIN)).clamp(0.0, 1.0);
+    let y = r.center().y;
+    let rail_r = egui::Rect::from_min_max(egui::pos2(r.left(), y - 2.5 * k), egui::pos2(r.right(), y + 2.5 * k));
+    p.rect_filled(rail_r, 2.5 * k, rail);
+    let x = r.left() + t * r.width();
+    p.rect_filled(egui::Rect::from_min_max(rail_r.min, egui::pos2(x, rail_r.max.y)), 2.5 * k, accent.gamma_multiply(0.7));
+    p.circle_filled(egui::pos2(x, y), 7.0 * k, Color32::from_gray(225));
+    p.circle_stroke(egui::pos2(x, y), 7.0 * k, egui::Stroke::new(1.0 * k, accent));
+}
+
+/// UI scale slider that applies live. While it is dragged it stays where it was on screen, at its
+/// original size (everything else rescales around it), so the value under the pointer stays put.
+fn ui_scale_slider(ui: &mut egui::Ui, scale: &mut f32) -> bool {
+    let ctx = ui.ctx().clone();
+    let key = egui::Id::new("ui_scale_live_drag");
+    let ppp = ctx.pixels_per_point();
+    let (accent, rail) = (ui.visuals().selection.stroke.color, ui.visuals().widgets.inactive.bg_fill);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(170.0, 20.0), egui::Sense::click_and_drag());
+    let before = *scale;
+    // (slider rectangle in physical pixels, pixels per point when the drag started)
+    let drag: Option<([f32; 4], f32)> = ctx.data(|d| d.get_temp(key));
+    let value_at = |px: [f32; 4], x_px: f32| {
+        let t = ((x_px - px[0]) / (px[2] - px[0])).clamp(0.0, 1.0);
+        ((SCALE_MIN + t * (SCALE_MAX - SCALE_MIN)) / 0.05).round() * 0.05
+    };
+    match drag {
+        Some((px, p0)) if ctx.input(|i| i.pointer.primary_down()) => {
+            if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
+                *scale = value_at(px, pos.x * ppp);
+            }
+            // Drawn on top at the same physical position and size as when the drag started.
+            let k = p0 / ppp;
+            let r = egui::Rect::from_min_max(egui::pos2(px[0] / ppp, px[1] / ppp), egui::pos2(px[2] / ppp, px[3] / ppp));
+            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, key));
+            let frame = egui::Rect::from_min_max(r.min - egui::vec2(10.0, 8.0) * k, r.max + egui::vec2(64.0, 8.0) * k);
+            painter.rect(frame, 6.0 * k, ui.visuals().window_fill, egui::Stroke::new(1.0 * k, ui.visuals().window_stroke.color));
+            paint_scale_slider(&painter, r, *scale, k, accent, rail);
+            painter.text(egui::pos2(r.right() + 12.0 * k, r.center().y), egui::Align2::LEFT_CENTER, format!("{:.0}%", *scale * 100.0), egui::FontId::proportional(14.0 * k), ui.visuals().text_color());
+            ctx.request_repaint();
         }
-        ui.end_row();
-        ui.label("Brightness");
-        for vs in [&mut s.view2d, &mut s.view3d] {
-            changed |= ui.add(egui::Slider::new(&mut vs.map_brightness, 0.4..=1.2).show_value(false).trailing_fill(true)).changed();
+        Some(_) => ctx.data_mut(|d| d.remove::<([f32; 4], f32)>(key)),
+        None => {
+            paint_scale_slider(ui.painter(), rect, *scale, 1.0, accent, rail);
+            let px = [rect.left() * ppp, rect.top() * ppp, rect.right() * ppp, rect.bottom() * ppp];
+            if resp.is_pointer_button_down_on() {
+                if let Some(pos) = resp.interact_pointer_pos() {
+                    *scale = value_at(px, pos.x * ppp);
+                }
+                ctx.data_mut(|d| d.insert_temp(key, (px, ppp)));
+            }
         }
-        ui.end_row();
-    });
-    ui.separator();
-    ui.horizontal(|ui| {
-        ui.label("UI scale");
-        // Applied when the slider is released (it would rescale itself while being dragged).
-        let id = ui.id().with("ui_scale_drag");
-        let mut v: f32 = ui.data(|d| d.get_temp(id)).unwrap_or(s.ui_scale);
-        ui.spacing_mut().slider_width = 150.0;
-        let r = ui.add(egui::Slider::new(&mut v, 0.5..=2.5).step_by(0.05).trailing_fill(true).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
-        if r.drag_stopped() || (r.changed() && !r.dragged()) {
-            s.ui_scale = v;
-            changed = true;
-            ui.data_mut(|d| d.remove::<f32>(id));
-        } else if r.dragged() {
-            ui.data_mut(|d| d.insert_temp(id, v));
-        }
-    });
-    ui.label(RichText::new("Also Ctrl + mouse wheel, Ctrl + / Ctrl -").small().color(Color32::from_gray(140)));
-    changed
+    }
+    ui.label(format!("{:.0}%", *scale * 100.0));
+    (*scale - before).abs() > 0.0001
 }
 
 /// Ctrl + mouse wheel and Ctrl +/-/0 change the UI scale. Returns true when it changed.
@@ -207,32 +228,13 @@ pub fn ui_scale_input(ctx: &egui::Context, scale: &mut f32) -> bool {
     (*scale - before).abs() > 0.0001
 }
 
-/// One row of display toggles above the view (collapsible). `is3d` picks the 3D-only options.
-fn toggle_row(ui: &mut egui::Ui, title: &str, vs: &mut super::settings::ViewSettings, is3d: bool, collapsed: &mut bool) -> bool {
+/// One row of display settings above the view: toggles, HP text, marker size and brightness.
+fn toggle_row(ui: &mut egui::Ui, title: &str, vs: &mut super::settings::ViewSettings, is3d: bool) -> bool {
     let mut changed = false;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
         ui.spacing_mut().button_padding = egui::vec2(7.0, 2.0);
-        // Arrow (drawn: the font has no triangle glyphs) + title, both clickable.
-        let (r, arrow) = ui.allocate_exact_size(egui::vec2(16.0, 18.0), egui::Sense::click());
-        let c = r.center();
-        let col = ui.visuals().text_color();
-        let tri = if *collapsed {
-            vec![c + egui::vec2(-3.0, -5.0), c + egui::vec2(4.0, 0.0), c + egui::vec2(-3.0, 5.0)]
-        } else {
-            vec![c + egui::vec2(-5.0, -3.0), c + egui::vec2(5.0, -3.0), c + egui::vec2(0.0, 4.0)]
-        };
-        ui.painter().add(egui::Shape::convex_polygon(tri, col, egui::Stroke::NONE));
-        let label = ui.add(egui::Button::new(RichText::new(title).strong()).frame(false));
-        let hint = if *collapsed { "Show these display options" } else { "Hide these display options" };
-        if arrow.on_hover_text(hint).clicked() || label.on_hover_text(hint).clicked() {
-            *collapsed = !*collapsed;
-            changed = true;
-        }
-        if *collapsed {
-            return;
-        }
-        ui.add_space(6.0);
+        ui.add_sized([62.0, 20.0], egui::Label::new(RichText::new(title).strong()));
         let mut t = |ui: &mut egui::Ui, name: &str, v: &mut bool| {
             if ui.add(egui::Button::new(RichText::new(name).size(12.0)).selected(*v)).clicked() {
                 *v = !*v;
@@ -262,6 +264,12 @@ fn toggle_row(ui: &mut egui::Ui, title: &str, vs: &mut super::settings::ViewSett
                 changed |= ui.selectable_value(&mut vs.hp_text, m, name(m)).changed();
             }
         });
+        ui.add_space(8.0);
+        ui.spacing_mut().slider_width = 80.0;
+        ui.label(RichText::new("Markers").size(12.0));
+        changed |= ui.add(egui::Slider::new(&mut vs.marker_scale, 0.5..=2.0).show_value(false).trailing_fill(true)).changed();
+        ui.label(RichText::new("Brightness").size(12.0));
+        changed |= ui.add(egui::Slider::new(&mut vs.map_brightness, 0.4..=1.2).show_value(false).trailing_fill(true)).changed();
     });
     changed
 }
@@ -794,6 +802,10 @@ impl ReplayViewer {
                         settings_changed = true;
                     }
                 }
+                if ui.add(egui::Button::new("Display settings").selected(self.settings.display_open)).on_hover_text("Show or hide the display settings").clicked() {
+                    self.settings.display_open = !self.settings.display_open;
+                    settings_changed = true;
+                }
                 ui.separator();
                 let clock = battle.clock(t);
                 let text = match (clock.period, clock.remaining) {
@@ -820,29 +832,31 @@ impl ReplayViewer {
                         self.playing = true;
                     }
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.menu_button("Display ⚙", |ui| {
-                        ui.set_width(300.0);
-                        settings_changed |= display_settings_ui(ui, &mut self.settings);
-                    });
-                });
             });
         });
 
-        // Display toggles above the view: the 2D row (also the 3D view's corner minimap) and the 3D row.
-        let show_2d_row = !self.settings.view_3d || self.settings.corner_minimap;
-        egui::TopBottomPanel::top("view_toggles").show(ctx, |ui| {
-            ui.add_space(2.0);
-            let s = &mut self.settings;
-            if s.view_3d {
-                settings_changed |= toggle_row(ui, "3D", &mut s.view3d, true, &mut s.rows_collapsed[1]);
-            }
-            if show_2d_row {
-                let title = if s.view_3d { "Minimap" } else { "2D" };
-                settings_changed |= toggle_row(ui, title, &mut s.view2d, false, &mut s.rows_collapsed[0]);
-            }
-            ui.add_space(2.0);
-        });
+        // Display settings above the view (Display settings button): the 3D row, the 2D row (also the
+        // 3D view's corner minimap) and the UI scale.
+        if self.settings.display_open {
+            let show_2d_row = !self.settings.view_3d || self.settings.corner_minimap;
+            egui::TopBottomPanel::top("view_toggles").show(ctx, |ui| {
+                ui.add_space(2.0);
+                let s = &mut self.settings;
+                if s.view_3d {
+                    settings_changed |= toggle_row(ui, "3D", &mut s.view3d, true);
+                }
+                if show_2d_row {
+                    let title = if s.view_3d { "Minimap" } else { "2D" };
+                    settings_changed |= toggle_row(ui, title, &mut s.view2d, false);
+                }
+                ui.horizontal(|ui| {
+                    ui.add_sized([62.0, 20.0], egui::Label::new(RichText::new("UI scale").strong()));
+                    settings_changed |= ui_scale_slider(ui, &mut s.ui_scale);
+                    ui.label(RichText::new("(also Ctrl + mouse wheel)").small().color(Color32::from_gray(140)));
+                });
+                ui.add_space(2.0);
+            });
+        }
 
         egui::TopBottomPanel::bottom("viewer_bottom").show(ctx, |ui| {
             ui.add_space(4.0);
