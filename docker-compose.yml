@@ -6,6 +6,9 @@
 #   OPERATOR_CONTACT=...     # e-mail or URL for data requests (shown on /privacy)
 #   OPERATOR_ADDRESS=...     # optional postal address (shown on /privacy)
 #   ADMIN_TOKEN=...          # long random string: removal requests (see README)
+#   DATA_PATH=/mnt/data/livereplay   # optional: keep all data in this host folder (e.g. another drive);
+#                                    # the folder must be writable by uid 1000: sudo chown -R 1000:1000 /mnt/data/livereplay
+#                                    # default: the Docker volume "livereplay-data"
 services:
   livereplay:
     build: .
@@ -16,7 +19,8 @@ services:
       - OPERATOR_ADDRESS=${OPERATOR_ADDRESS:-}
       - ADMIN_TOKEN=${ADMIN_TOKEN:-}
     volumes:
-      - livereplay-data:/data   # battles, codes, uploaded map data: back this up
+      # Battles, codes, uploaded map data: back this up. A host folder when DATA_PATH is set.
+      - ${DATA_PATH:-livereplay-data}:/data
   caddy:
     image: caddy:2
     restart: unless-stopped

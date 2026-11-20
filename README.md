@@ -68,7 +68,8 @@ stores and serves it, and the web viewer (the same viewer compiled to WebAssembl
 * Run it (Docker): put a `.env` next to `docker-compose.yml` with `DOMAIN` (default `wot.arne.my`), `OPERATOR_NAME`,
   `OPERATOR_CONTACT` (e-mail or URL for data requests), optionally `OPERATOR_ADDRESS`, and `ADMIN_TOKEN` (long random
   string), point the domain's DNS at the machine, then `docker compose up -d --build`. Caddy gets the HTTPS certificate.
-  Data lives in the `livereplay-data` volume (back it up). Without Docker: `cargo build --release -p livereplay-server`,
+  Data lives in the `livereplay-data` volume, or in any host folder when `DATA_PATH` is set in `.env` (e.g. a separate drive:
+  `DATA_PATH=/mnt/data/livereplay`; create it and `sudo chown -R 1000:1000` it first, the server runs as uid 1000). Back it up. Without Docker: `cargo build --release -p livereplay-server`,
   `sh web/build.sh`, then run `livereplay-server` (env `BIND`, `DATA_DIR`, `WEB_DIR`, `THREADS`, plus the ones above).
 * Limits (env, optional): `MAX_BATTLES_PER_DAY` (300 per uploader), `MAX_KEY_MB` (2048), `MAX_TOTAL_GB` (50).
 * Privacy (GDPR): the policy is served at `/privacy` from the operator settings. No IP addresses or access logs, no cookies,
@@ -116,6 +117,7 @@ Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
 - [ ] Smaller web bundle: 1.4 MB gzipped before wasm-opt (the Docker build runs wasm-opt -Oz); next steps if needed: Brotli, fewer egui fonts
 
 ### Done
+- Server data can live in a host folder (`DATA_PATH` in `.env`, e.g. on another drive) instead of the Docker volume
 - UI scale is a slider again and applies live: while dragging, the slider stays where it was on screen at its original size and
   everything else rescales; also Ctrl + mouse wheel and Ctrl +/- (viewer and replay list); sliders show their filled bar again
 - Display settings: a "Display settings" button in the top bar (next to 2D / 3D / Minimap) shows or hides rows above the view:
