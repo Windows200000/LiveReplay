@@ -99,14 +99,7 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 
 #### Viewer
 
-
-
-
-- [ ] (On hold — user chose simple, non-repeating textures) 3D object textures as the game's real look, baked: per model, combine its actual material textures the way the
-      game shader does (PBS_tiled: tiles 0-2 mixed by the model's blendMask, each x its g_tileNTint, + dirt map;
-      PBS_tiled_atlas_global (rocks): atlas tiles by g_atlasIndexes mixed by atlasBlend + globalTex; classic: diffuseMap),
-      bake into one texture per model, then simplify the mesh keeping UVs. No stand-in tile textures (user, general rule)
-
+Nothing open.
 
 #### Server (wot.arne.my)
 Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
