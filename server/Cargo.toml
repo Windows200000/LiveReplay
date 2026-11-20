@@ -15,3 +15,5 @@ serde_json = "1"
 sha2 = "0.10"
 getrandom = "0.2"
 flate2 = "1"
+# Web viewer files are also served Brotli-compressed (smaller than gzip).
+brotli = "7"

@@ -97,6 +97,7 @@ struct State {
 struct StaticFile {
     body: Vec<u8>,
     gz: Option<Vec<u8>>,
+    br: Option<Vec<u8>>,
     etag: String,
     ctype: &'static str,
 }
@@ -125,6 +126,13 @@ fn gzip(b: &[u8]) -> Vec<u8> {
     let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
     let _ = e.write_all(b);
     e.finish().unwrap_or_default()
+}
+
+fn brotli_bytes(b: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let params = brotli::enc::BrotliEncoderParams { quality: 11, lgwin: 24, ..Default::default() };
+    let _ = brotli::BrotliCompress(&mut &b[..], &mut out, &params);
+    out
 }
 
 fn content_type(p: &str) -> &'static str {
@@ -176,9 +184,11 @@ impl App {
                 let Ok(body) = std::fs::read(&p) else { continue };
                 let rel = p.strip_prefix(web_dir).unwrap_or(&p).to_string_lossy().replace('\\', "/");
                 let ctype = content_type(&rel);
-                let gz = (!ctype.starts_with("image/png") && body.len() > 512).then(|| gzip(&body));
+                let compressible = !ctype.starts_with("image/png") && body.len() > 512;
+                let gz = compressible.then(|| gzip(&body));
+                let br = compressible.then(|| brotli_bytes(&body));
                 let etag = format!("\"{}\"", &sha_hex(&body)[..16]);
-                web.insert(format!("/{rel}"), StaticFile { body, gz, etag, ctype });
+                web.insert(format!("/{rel}"), StaticFile { body, gz, br, etag, ctype });
             }
         }
         // Expired viewing codes are deleted.
@@ -730,10 +740,14 @@ fn static_file(app: &App, rq: &Request, path: &str) -> Reply {
     if header(rq, "If-None-Match") == Some(f.etag.as_str()) {
         return Reply { status: 304, body: vec![], ctype: f.ctype, headers: vec![("ETag".into(), f.etag.clone())], compress: false };
     }
-    let gz = header(rq, "Accept-Encoding").is_some_and(|a| a.contains("gzip"));
+    let accept = header(rq, "Accept-Encoding").unwrap_or("");
     let mut r = Reply { status: 200, body: vec![], ctype: f.ctype, headers: vec![("ETag".into(), f.etag.clone()), ("Cache-Control".into(), "no-cache".into())], compress: false };
-    match (&f.gz, gz) {
-        (Some(z), true) => {
+    match (&f.br, &f.gz) {
+        (Some(b), _) if accept.contains("br") => {
+            r.body = b.clone();
+            r.headers.push(("Content-Encoding".into(), "br".into()));
+        }
+        (_, Some(z)) if accept.contains("gzip") => {
             r.body = z.clone();
             r.headers.push(("Content-Encoding".into(), "gzip".into()));
         }

@@ -113,9 +113,9 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
 - [ ] Deploy to wot.arne.my (`docker compose up -d --build` on a host with Docker; DNS to that host) — needs the user's server.
       Until then uploads from the app fail with a network error (uploading is off by default)
-- [ ] Smaller web bundle: 1.4 MB gzipped before wasm-opt (the Docker build runs wasm-opt -Oz); next steps if needed: Brotli, fewer egui fonts
 
 ### Done
+- Web viewer download: Brotli-compressed by the server (1.22 MB instead of 1.52 MB gzipped; wasm-opt also runs in the Docker build)
 - eframe/egui 0.28 -> 0.29 (winit 0.30): macOS builds on current stable Rust again (the old objc2 0.4 is gone)
 - Labels never overlap for alive tanks (2D and 3D): own tank first, then allies, then enemies; a label that doesn't fit next
   to its marker moves to the nearest free spot with a thin line to its tank (markers may overlap)
