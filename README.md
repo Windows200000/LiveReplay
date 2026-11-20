@@ -107,6 +107,8 @@ What's planned, what's done, and the project rules. Kept up to date with every c
       PBS_tiled_atlas_global (rocks): atlas tiles by g_atlasIndexes mixed by atlasBlend + globalTex; classic: diffuseMap),
       bake into one texture per model, then simplify the mesh keeping UVs. No stand-in tile textures (user, general rule)
 
+- [ ] Upgrade eframe/egui (0.28 -> current): needed for macOS builds with the newest Rust (CI pins Rust 1.85 on macOS until then)
+
 #### Server (wot.arne.my)
 Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
 - [ ] Deploy to wot.arne.my (`docker compose up -d --build` on a host with Docker; DNS to that host) — needs the user's server.
