@@ -182,14 +182,23 @@ fn ui_scale_slider(ui: &mut egui::Ui, scale: &mut f32) -> bool {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(170.0, 20.0), egui::Sense::click_and_drag());
     let before = *scale;
     // (slider rectangle in physical pixels, pixels per point when the drag started)
-    let drag: Option<([f32; 4], f32)> = ctx.data(|d| d.get_temp(key));
+    let mut drag: Option<([f32; 4], f32)> = ctx.data(|d| d.get_temp(key));
+    // Released: back to the normal slider in this same frame.
+    if drag.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
+        ctx.data_mut(|d| d.remove::<([f32; 4], f32)>(key));
+        drag = None;
+        ctx.request_repaint();
+    }
     let value_at = |px: [f32; 4], x_px: f32| {
         let t = ((x_px - px[0]) / (px[2] - px[0])).clamp(0.0, 1.0);
         ((SCALE_MIN + t * (SCALE_MAX - SCALE_MIN)) / 0.05).round() * 0.05
     };
     match drag {
-        Some((px, p0)) if ctx.input(|i| i.pointer.primary_down()) => {
-            if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
+        Some((px, p0)) => {
+            // Only real mouse moves count: the remembered pointer position is in points of the
+            // scale it was recorded at, so re-reading it after a rescale would make the value jump.
+            let moved = ctx.input(|i| i.events.iter().rev().find_map(|e| if let egui::Event::PointerMoved(p) = e { Some(*p) } else { None }));
+            if let Some(pos) = moved {
                 *scale = value_at(px, pos.x * ppp);
             }
             // Drawn on top at the same physical position and size as when the drag started.
@@ -202,7 +211,6 @@ fn ui_scale_slider(ui: &mut egui::Ui, scale: &mut f32) -> bool {
             painter.text(egui::pos2(r.right() + 12.0 * k, r.center().y), egui::Align2::LEFT_CENTER, format!("{:.0}%", *scale * 100.0), egui::FontId::proportional(14.0 * k), ui.visuals().text_color());
             ctx.request_repaint();
         }
-        Some(_) => ctx.data_mut(|d| d.remove::<([f32; 4], f32)>(key)),
         None => {
             paint_scale_slider(ui.painter(), rect, *scale, 1.0, accent, rail);
             let px = [rect.left() * ppp, rect.top() * ppp, rect.right() * ppp, rect.bottom() * ppp];

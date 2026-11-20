@@ -37,6 +37,9 @@ pub struct App {
     consent: Option<Vec<PathBuf>>,
     /// UI scale on the replay list (shared with the viewer's setting).
     ui_scale: f32,
+    /// The battle being played right now (`temp.wotreplay`): its size when read, and its summary.
+    in_progress: Option<(u64, ReplayEntry)>,
+    in_progress_checked: f64,
     /// The consent dialog is the first-start question.
     consent_first: bool,
     /// "Delete all my data" was clicked once (asks again before deleting).
@@ -69,6 +72,8 @@ impl Default for App {
             consent: first_ask.then(Vec::new),
             consent_first: first_ask,
             ui_scale: crate::viewer::settings::ViewerSettings::load().ui_scale,
+            in_progress: None,
+            in_progress_checked: -10.0,
             confirm_delete: false,
             cfg,
             entries: Vec::new(),
@@ -249,6 +254,39 @@ impl App {
             });
             ui.add_space(4.0);
         });
+
+        // The battle in progress: checked every 2 s; read once per battle (the file only grows).
+        let now = ctx.input(|i| i.time);
+        if now - self.in_progress_checked > 2.0 {
+            self.in_progress_checked = now;
+            let path = PathBuf::from(&self.cfg.replays_dir).join("temp.wotreplay");
+            let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            if len == 0 {
+                self.in_progress = None;
+            } else if self.in_progress.as_ref().map_or(true, |(l, _)| len < *l) {
+                self.in_progress = library::summarize(&path, self.engine.as_ref().map(|e| &e.game)).map(|e| (len, e));
+            } else if let Some((l, _)) = &mut self.in_progress {
+                *l = len;
+            }
+        }
+        ctx.request_repaint_after(std::time::Duration::from_secs(2));
+        let mut watch_live = false;
+        if let Some((_, e)) = &self.in_progress {
+            egui::TopBottomPanel::top("in_progress").show(ctx, |ui| {
+                ui.add_space(4.0);
+                let red = Color32::from_rgb(255, 80, 70);
+                let text = format!("LIVE   {}   {}   {}   {}   in progress", e.player_name, e.tank, e.map, e.mode);
+                let b = egui::Button::new(RichText::new(text).color(Color32::WHITE).strong())
+                    .fill(red.gamma_multiply(0.35))
+                    .stroke(egui::Stroke::new(1.0, red))
+                    .min_size(egui::vec2(ui.available_width(), 30.0));
+                watch_live = ui.add(b).on_hover_text("Watch the battle you are playing right now").clicked();
+                ui.add_space(2.0);
+            });
+        }
+        if watch_live {
+            self.open_live();
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| match self.table.show(ui, &self.entries, &mut self.selected, self.sort) {
             Action::Open(p) => self.open_viewer(PathBuf::from(p)),

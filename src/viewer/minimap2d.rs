@@ -118,6 +118,9 @@ pub struct Minimap2D {
     image: Option<egui::ColorImage>,
     /// Random-event overlays (danger zones and aftermath).
     layers: Vec<EventLayer>,
+    /// Zoom (1 = whole map) and the map point (0..1) at the centre of the view.
+    zoom: f32,
+    center: Vec2,
 }
 
 /// Slightly richer colours than the raw texture (the game draws the minimap over the 3D scene).
@@ -139,7 +142,7 @@ fn grade(img: &Image) -> egui::ColorImage {
 
 impl Minimap2D {
     pub fn new(arena: ArenaDef, gameplay: GameplayDef, image: Option<Image>) -> Self {
-        Self { arena, gameplay, texture: None, image: image.as_ref().map(grade), layers: Vec::new() }
+        Self { arena, gameplay, texture: None, image: image.as_ref().map(grade), layers: Vec::new(), zoom: 1.0, center: Vec2::splat(0.5) }
     }
 
     /// Add random-event aftermath overlays (same size/placement as the minimap).
@@ -274,6 +277,42 @@ impl BattleView for Minimap2D {
         let painter = ui.painter_at(outer);
         let map_painter = painter.with_clip_rect(rect);
 
+        // Zoom: mouse wheel (around the pointer), right- or middle-drag pans, double-click resets.
+        // `mrect` is the whole map at the current zoom; everything is placed through it and clipped
+        // to the visible `rect`.
+        let full = |zoom: f32, center: Vec2| {
+            let s = side * zoom;
+            Rect::from_min_size(rect.center() - center * s, Vec2::splat(s))
+        };
+        let clamp_center = |zoom: f32, c: Vec2| {
+            let h = 0.5 / zoom;
+            Vec2::new(c.x.clamp(h, 1.0 - h), c.y.clamp(h, 1.0 - h))
+        };
+        if response.hovered() {
+            let (scroll, ctrl) = ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers.command));
+            if scroll != 0.0 && !ctrl {
+                let before = full(self.zoom, self.center);
+                let z = (self.zoom * (scroll * 0.0025).exp()).clamp(1.0, 10.0);
+                if let Some(ptr) = response.hover_pos() {
+                    // Keep the map point under the pointer where it is.
+                    let u = (ptr - before.min) / before.width();
+                    let s = side * z;
+                    let min = ptr - u * s;
+                    self.center = (rect.center() - min) / s;
+                }
+                self.zoom = z;
+                self.center = clamp_center(self.zoom, self.center);
+            }
+        }
+        if response.dragged_by(egui::PointerButton::Secondary) || response.dragged_by(egui::PointerButton::Middle) {
+            self.center = clamp_center(self.zoom, self.center - response.drag_delta() / (side * self.zoom));
+        }
+        if response.double_clicked() {
+            self.zoom = 1.0;
+            self.center = Vec2::splat(0.5);
+        }
+        let mrect = full(self.zoom, self.center);
+
         if self.texture.is_none() {
             if let Some(img) = self.image.take() {
                 self.texture = Some(ui.ctx().load_texture(format!("minimap-{}", self.arena.map), img, egui::TextureOptions::LINEAR));
@@ -288,7 +327,7 @@ impl BattleView for Minimap2D {
         painter.rect_filled(rect, 0.0, Color32::from_rgb(20, 22, 18));
         if let Some(tex) = &self.texture {
             let b = (st.map_brightness.clamp(0.2, 1.5) * 255.0).min(255.0) as u8;
-            painter.image(tex.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::from_gray(b));
+            map_painter.image(tex.id(), mrect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::from_gray(b));
             for ev in input.events {
                 let mut show = Vec::new();
                 if ev.done {
@@ -299,7 +338,7 @@ impl BattleView for Minimap2D {
                 }
                 for i in show {
                     if let Some(tex) = &self.layers[i].texture {
-                        painter.image(tex.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::from_gray(b));
+                        map_painter.image(tex.id(), mrect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::from_gray(b));
                     }
                 }
             }
@@ -312,14 +351,20 @@ impl BattleView for Minimap2D {
             let rows = ["A", "B", "C", "D", "E", "F", "G", "H", "J", "K"];
             for i in 0..=10 {
                 let f = i as f32 / 10.0;
-                let x = rect.left() + f * rect.width();
-                let y = rect.top() + f * rect.height();
-                painter.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], grid);
-                painter.line_segment([Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)], grid);
+                let x = mrect.left() + f * mrect.width();
+                let y = mrect.top() + f * mrect.height();
+                map_painter.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], grid);
+                map_painter.line_segment([Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)], grid);
                 if i < 10 && show_grid_labels {
-                    let cell = rect.width() / 10.0;
-                    painter.text(Pos2::new(x + cell / 2.0, outer.top() + margin / 2.0), egui::Align2::CENTER_CENTER, ((i + 1) % 10).to_string(), label_font.clone(), Color32::from_gray(170));
-                    painter.text(Pos2::new(outer.left() + margin / 2.0, y + cell / 2.0), egui::Align2::CENTER_CENTER, rows[i], label_font.clone(), Color32::from_gray(170));
+                    // Labels follow the zoomed grid; only those whose cell centre is in view.
+                    let cell = mrect.width() / 10.0;
+                    let (cx, cy) = (x + cell / 2.0, y + cell / 2.0);
+                    if cx >= rect.left() && cx <= rect.right() {
+                        painter.text(Pos2::new(cx, outer.top() + margin / 2.0), egui::Align2::CENTER_CENTER, ((i + 1) % 10).to_string(), label_font.clone(), Color32::from_gray(170));
+                    }
+                    if cy >= rect.top() && cy <= rect.bottom() {
+                        painter.text(Pos2::new(outer.left() + margin / 2.0, cy), egui::Align2::CENTER_CENTER, rows[i], label_font.clone(), Color32::from_gray(170));
+                    }
                 }
             }
         }
@@ -329,8 +374,8 @@ impl BattleView for Minimap2D {
         if st.show_bases {
             // Capture circles: white; tinted with the capturing team's colour while being capped.
             for c in input.captures {
-                let p = self.to_screen(rect, c.pos[0], c.pos[1]);
-                let r = (self.to_screen(rect, c.pos[0] + c.radius, c.pos[1]).x - p.x).abs();
+                let p = self.to_screen(mrect, c.pos[0], c.pos[1]);
+                let r = (self.to_screen(mrect, c.pos[0] + c.radius, c.pos[1]).x - p.x).abs();
                 map_painter.circle_stroke(p, r, Stroke::new(1.6_f32 * k, Color32::from_white_alpha(170)));
                 if let Some(team) = c.capturing_team {
                     let col = if c.blocked { Color32::from_gray(150) } else { team_color(team == input.recorder_team) };
@@ -362,13 +407,13 @@ impl BattleView for Minimap2D {
             for (team, bases) in self.gameplay.bases.iter().enumerate() {
                 let color = team_color(team == own);
                 for b in bases {
-                    flag(self.to_screen(rect, b[0], b[1]), color, color);
+                    flag(self.to_screen(mrect, b[0], b[1]), color, color);
                 }
             }
             for (team, spawns) in self.gameplay.spawns.iter().enumerate() {
                 let color = team_color(team == own);
                 for (n, sp) in spawns.iter().enumerate() {
-                    let p = self.to_screen(rect, sp[0], sp[1]);
+                    let p = self.to_screen(mrect, sp[0], sp[1]);
                     let r = 16.0 * k;
                     let pts = vec![p + Vec2::new(0.0, -r), p + Vec2::new(r, 0.0), p + Vec2::new(0.0, r), p + Vec2::new(-r, 0.0)];
                     map_painter.add(Shape::convex_polygon(pts.clone(), color.gamma_multiply(0.22), Stroke::NONE));
@@ -379,13 +424,13 @@ impl BattleView for Minimap2D {
                 }
             }
             for cp in &self.gameplay.control_points {
-                flag(self.to_screen(rect, cp[0], cp[1]), Color32::from_gray(235), Color32::from_gray(205));
+                flag(self.to_screen(mrect, cp[0], cp[1]), Color32::from_gray(235), Color32::from_gray(205));
             }
         }
 
         // 3D camera: translucent white dot with a view cone.
         if let Some([cx, cz, yaw]) = input.camera {
-            let p = self.to_screen(rect, cx, cz);
+            let p = self.to_screen(mrect, cx, cz);
             let len = side * 0.16;
             let half = 25f32.to_radians();
             // Screen: x = east, y = south; yaw 0 = north (+z).
@@ -402,8 +447,8 @@ impl BattleView for Minimap2D {
         if st.range_circle {
             // One per uploader when several recordings are merged.
             for me in input.units.iter().filter(|u| (u.is_recorder || u.is_viewpoint) && u.alive) {
-                let p = self.to_screen(rect, me.pos[0], me.pos[2]);
-                let px_per_m = rect.width() / (self.arena.bbox_max[0] - self.arena.bbox_min[0]);
+                let p = self.to_screen(mrect, me.pos[0], me.pos[2]);
+                let px_per_m = mrect.width() / (self.arena.bbox_max[0] - self.arena.bbox_min[0]);
                 map_painter.circle_stroke(p, 564.0 * px_per_m, Stroke::new(1.3_f32, Color32::from_rgba_unmultiplied(230, 215, 70, 200)));
             }
         }
@@ -414,8 +459,8 @@ impl BattleView for Minimap2D {
                 // Top-down the arc is a straight line: muzzle -> shell.
                 let path = s.path(0.0);
                 let (Some(first), Some(last)) = (path.first(), path.last()) else { continue };
-                let a = self.to_screen(rect, first[0], first[2]);
-                let b = self.to_screen(rect, last[0], last[2]);
+                let a = self.to_screen(mrect, first[0], first[2]);
+                let b = self.to_screen(mrect, last[0], last[2]);
                 let base = if s.is_ally { Color32::from_rgb(255, 236, 150) } else { Color32::from_rgb(255, 170, 120) };
                 map_painter.line_segment([a, b], Stroke::new(2.2_f32, base.gamma_multiply(s.alpha)));
                 map_painter.circle_filled(b, 2.6, base.gamma_multiply(s.alpha));
@@ -431,7 +476,7 @@ impl BattleView for Minimap2D {
         let small = side < 300.0;
 
         // Hit-test first, then draw, so the hovered unit is known while drawing.
-        let points: Vec<Pos2> = input.units.iter().map(|u| self.to_screen(rect, u.pos[0], u.pos[2])).collect();
+        let points: Vec<Pos2> = input.units.iter().map(|u| self.to_screen(mrect, u.pos[0], u.pos[2])).collect();
         for (u, &p) in input.units.iter().zip(&points) {
             out.anchors.insert(u.id, p);
             if let Some(ptr) = pointer {
@@ -463,8 +508,8 @@ impl BattleView for Minimap2D {
             if let Some(pt) = response.interact_pointer_pos() {
                 let [x0, z0] = self.arena.bbox_min;
                 let [x1, z1] = self.arena.bbox_max;
-                let u = ((pt.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-                let v = ((pt.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
+                let u = ((pt.x - mrect.left()) / mrect.width()).clamp(0.0, 1.0);
+                let v = ((pt.y - mrect.top()) / mrect.height()).clamp(0.0, 1.0);
                 out.clicked_world = Some([x0 + u * (x1 - x0), z1 - v * (z1 - z0)]);
             }
         }

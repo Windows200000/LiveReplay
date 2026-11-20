@@ -164,6 +164,8 @@ pub fn scan(dir: PathBuf, game_dir: String) -> mpsc::Receiver<ScanEvent> {
             .flatten()
             .flatten()
             .filter(|e| e.path().extension().is_some_and(|x| x == "wotreplay"))
+            // The battle being played (shown separately at the top of the list).
+            .filter(|e| e.file_name() != "temp.wotreplay")
             .filter_map(|e| {
                 let meta = e.metadata().ok()?;
                 let modified = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
