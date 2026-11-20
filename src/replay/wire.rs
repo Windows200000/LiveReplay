@@ -40,6 +40,7 @@ pub fn slice(b: &Battle, from: f32) -> Battle {
         v.turret_yaw.retain(|s| ge(s.0, from));
         v.gun_codes.retain(|s| ge(s.0, from));
         v.shot_pitch.retain(|s| ge(s.0, from));
+        v.crits.retain(|c| ge(c.t, from));
     }
     out.events.retain(|e| ge(e.t, from));
     out.shots.retain(|s| ge(s.t, from));
@@ -66,6 +67,7 @@ pub fn apply(base: Option<Battle>, chunk: Chunk) -> Battle {
         join(&mut ov.turret_yaw, &mut v.turret_yaw, |s| !ge(s.0, from));
         join(&mut ov.gun_codes, &mut v.gun_codes, |s| !ge(s.0, from));
         join(&mut ov.shot_pitch, &mut v.shot_pitch, |s| !ge(s.0, from));
+        join(&mut ov.crits, &mut v.crits, |c| !ge(c.t, from));
     }
     for (id, ov) in old.vehicles {
         b.vehicles.entry(id).or_insert(ov);

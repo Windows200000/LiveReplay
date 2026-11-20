@@ -57,9 +57,25 @@ pub struct VehicleRec {
     #[serde(default)]
     pub shot_pitch: Vec<(f32, f32)>,
     pub death_time: Option<f32>,
+    /// Module / crew state changes seen in the replay (track hits for any tank in view, enemy
+    /// modules when the recording player got that information).
+    pub crits: Vec<Crit>,
     /// End-of-battle stats from the results block (complete replays only).
     #[serde(with = "super::wire::json_text")]
     pub final_stats: Option<serde_json::Value>,
+}
+
+/// A module or crew member changing state: 0 = working, 1 = damaged, 2 = destroyed / out.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Crit {
+    pub t: f32,
+    /// The game's slot name, e.g. `leftTrack0Health` (left and right track are separate slots).
+    pub slot: String,
+    /// What it is (icon): engine, ammoBay, fuelTank, radio, track, gun, turretRotator, surveyingDevice,
+    /// commander, driver, radioman, gunner, loader.
+    pub kind: String,
+    pub state: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -330,6 +346,28 @@ fn calibrate_gun_pitch(b: &mut Battle) {
     }
 }
 
+/// A knocked-off track is repaired when the tank drives again (the replay has no repair event for
+/// other tanks): add a "working" entry at the first moment it moved more than a metre.
+fn tracks_repaired_by_moving(b: &mut Battle) {
+    for v in b.vehicles.values_mut() {
+        let mut add = Vec::new();
+        for c in v.crits.iter().filter(|c| c.kind == "track" && c.state == 2) {
+            // Already marked working again later (e.g. from a module report)?
+            if v.crits.iter().any(|o| o.slot == c.slot && o.t > c.t && o.state == 0) {
+                continue;
+            }
+            let Some(i) = v.track.iter().rposition(|s| s.t <= c.t) else { continue };
+            let p0 = v.track[i].pos;
+            let moved = v.track[i..].iter().find(|s| s.t > c.t + 0.5 && ((s.pos[0] - p0[0]).powi(2) + (s.pos[2] - p0[2]).powi(2)).sqrt() > 1.0);
+            if let Some(s) = moved {
+                add.push(Crit { t: s.t, slot: c.slot.clone(), kind: c.kind.clone(), state: 0 });
+            }
+        }
+        v.crits.extend(add);
+        v.crits.sort_by(|a, b| a.t.total_cmp(&b.t));
+    }
+}
+
 /// `gunAnglesPacked`: turret yaw in the top 10 bits (full circle), gun pitch in the low 6.
 pub(crate) fn decode_turret_yaw(code: u16) -> f32 {
     let yaw = ((code >> 6) & 1023) as f32;
@@ -468,6 +506,9 @@ impl Battle {
         let m_hit = vehicle_def.and_then(|v| v.method_index("showDamageFromShot"));
         let m_tracer = avatar.and_then(|a| a.method_index("showTracer"));
         let m_random_event = avatar.and_then(|a| a.method_index("onRandomEvent"));
+        let m_damaged_devices = avatar.and_then(|a| a.method_index("showOtherVehicleDamagedDevices"));
+        let m_extra_hit = vehicle_def.and_then(|v| v.method_index("onExtraHitted"));
+        let extras = gd.vehicle_extras();
         let m_stop_tracer = avatar.and_then(|a| a.method_index("stopTracer"));
         let m_explode = avatar.and_then(|a| a.method_index("explodeProjectile"));
         // shot id -> index into b.shots
@@ -675,6 +716,15 @@ impl Battle {
                         if mid == m_health {
                             let Some(args) = vd.client_methods[mid.unwrap()].decode(body) else { continue };
                             push_health(&mut b, &mut last_health_event, p.time, id, args[0].int() as i32, args[1].int() as i32, args[2].int() as i32);
+                        } else if mid == m_extra_hit && m_extra_hit.is_some() {
+                            // onExtraHitted(extra index, hit point): a module hit with a visible effect
+                            // (in practice the tracks: knocked off until repaired).
+                            let mut c2 = Cursor::new(body);
+                            if let Some(Some((slot, kind))) = c2.i16().and_then(|i| extras.get(i as usize)) {
+                                let state = if kind == "track" { 2 } else { 1 };
+                                let rec = b.vehicles.entry(id).or_insert_with(|| VehicleRec { id, ..Default::default() });
+                                rec.crits.push(Crit { t: p.time, slot: slot.clone(), kind: kind.clone(), state });
+                            }
                         } else if mid == m_shoot {
                             b.events.push(Event { t: p.time, kind: EventKind::Shot { shooter: id } });
                         } else if mid == m_hit {
@@ -708,6 +758,31 @@ impl Battle {
                         } else if mid == m_update_arena {
                             let Some(args) = av.client_methods[mid.unwrap()].decode(body) else { continue };
                             handle_arena_update(&mut b, p.time, args[0].int(), args[1].bytes());
+                        } else if mid == m_damaged_devices && m_damaged_devices.is_some() {
+                            // showOtherVehicleDamagedDevices(vehicle, damaged extras, destroyed extras): the
+                            // full current state of another tank's modules / crew.
+                            let Some(args) = av.client_methods[mid.unwrap()].decode(body) else { continue };
+                            let target = args[0].int() as i32;
+                            let list = |v: &Val| -> Vec<usize> { v.list().iter().map(|x| x.int() as usize).collect() };
+                            let (damaged, destroyed) = (list(&args[1]), list(&args[2]));
+                            let rec = b.vehicles.entry(target).or_insert_with(|| VehicleRec { id: target, ..Default::default() });
+                            // Everything not listed is working again.
+                            let mut last: std::collections::HashMap<String, (String, u8)> = std::collections::HashMap::new();
+                            for c in &rec.crits {
+                                last.insert(c.slot.clone(), (c.kind.clone(), c.state));
+                            }
+                            let listed: Vec<(usize, u8)> = damaged.iter().map(|&i| (i, 1)).chain(destroyed.iter().map(|&i| (i, 2))).collect();
+                            for (slot, (kind, state)) in last {
+                                let still = listed.iter().any(|(i, _)| extras.get(*i).and_then(|e| e.as_ref()).is_some_and(|e| e.0 == slot));
+                                if state > 0 && !still {
+                                    rec.crits.push(Crit { t: p.time, slot, kind, state: 0 });
+                                }
+                            }
+                            for (i, state) in listed {
+                                if let Some(Some((slot, kind))) = extras.get(i) {
+                                    rec.crits.push(Crit { t: p.time, slot: slot.clone(), kind: kind.clone(), state });
+                                }
+                            }
                         } else if mid == m_random_event && m_random_event.is_some() {
                             // onRandomEvent("04_airshipCrash01_scenario"): the warning for a random event.
                             let Some(args) = av.client_methods[mid.unwrap()].decode(body) else { continue };
@@ -812,6 +887,7 @@ impl Battle {
         }
         b.recorder_team = b.recorder_vehicle.and_then(|id| b.vehicles.get(&id)).map(|v| v.team).unwrap_or(1);
         calibrate_gun_pitch(&mut b);
+        tracks_repaired_by_moving(&mut b);
         // Tanks known only from enemy info records: the recorder's enemies.
         let enemy = if b.recorder_team == 1 { 2 } else { 1 };
         for rec in b.vehicles.values_mut().filter(|r| r.team == TEAM_FROM_INFO) {

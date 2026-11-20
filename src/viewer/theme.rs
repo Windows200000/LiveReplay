@@ -11,6 +11,17 @@ pub const TEXT: Color32 = Color32::from_rgb(222, 226, 233);
 pub const MUTED: Color32 = Color32::from_rgb(132, 141, 156);
 pub const ACCENT: Color32 = Color32::from_rgb(255, 122, 89);
 
+/// Module / crew kinds that can show as damaged / destroyed, in display order (the game's names).
+pub const CRIT_KINDS: [&str; 13] =
+    ["ammoBay", "engine", "fuelTank", "gun", "turretRotator", "track", "radio", "surveyingDevice", "commander", "driver", "gunner", "loader", "radioman"];
+
+/// The game's crit icon for a kind and state (1 = damaged, 2 = destroyed); crew only have "destroyed".
+pub fn crit_icon_path(kind: &str, state: u8) -> String {
+    let crew = matches!(kind, "commander" | "driver" | "gunner" | "loader" | "radioman");
+    let suffix = if state >= 2 || crew { "destroyed" } else { "critical" };
+    format!("gui/maps/icons/library/crits/{}{suffix}small.png", kind.to_lowercase())
+}
+
 pub fn apply(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
     let v = &mut style.visuals;

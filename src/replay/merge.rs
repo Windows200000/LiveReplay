@@ -18,6 +18,7 @@ fn shift(b: &mut Battle, dt: f32) {
         v.turret_yaw.iter_mut().for_each(|s| s.0 += dt);
         v.gun_codes.iter_mut().for_each(|s| s.0 += dt);
         v.shot_pitch.iter_mut().for_each(|s| s.0 += dt);
+        v.crits.iter_mut().for_each(|c| c.t += dt);
         if let Some(d) = &mut v.death_time {
             *d += dt;
         }
@@ -91,6 +92,7 @@ pub fn add_viewpoint(base: &mut Battle, mut other: Battle) {
         v.gun_codes = union(&v.gun_codes, &ov.gun_codes, |s| s.0, |p, q| (p.0 - q.0).abs() < 0.05);
         v.turret_yaw = union(&v.turret_yaw, &ov.turret_yaw, |s| s.0, |p, q| (p.0 - q.0).abs() < 0.05);
         v.shot_pitch = union(&v.shot_pitch, &ov.shot_pitch, |s| s.0, |p, q| (p.0 - q.0).abs() < 0.05);
+        v.crits = union(&v.crits, &ov.crits, |c| c.t, |p, q| p.slot == q.slot && p.state == q.state && (p.t - q.t).abs() < 0.5);
         v.death_time = match (v.death_time, ov.death_time) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),

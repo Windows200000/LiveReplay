@@ -55,6 +55,8 @@ pub struct ViewInput<'a> {
     /// Unit hovered elsewhere, e.g. in the team lists (white ring).
     pub hovered: Option<i32>,
     pub recorder_team: u8,
+    /// Crit icons by (kind, state) for damaged / destroyed modules and crew.
+    pub crit_icons: &'a HashMap<(String, u8), egui::TextureId>,
 }
 
 pub struct ViewOutput {
@@ -452,7 +454,7 @@ impl BattleView for Minimap2D {
         }
         if !small {
             let items: Vec<(&Unit, Pos2)> = input.units.iter().zip(points.iter().copied()).collect();
-            draw_labels(&map_painter, &items, st, icon_r, &label_font);
+            draw_labels(&map_painter, &items, st, icon_r, &label_font, input.crit_icons);
         }
 
         out.hovered = best.map(|b| b.1);
@@ -568,10 +570,7 @@ pub fn draw_marker(
 /// Player / tank name labels. Labels of alive tanks never overlap each other (markers may): a label
 /// that doesn't fit at its usual place right of the marker moves to the nearest free spot and gets
 /// a thin line to its tank. Own tank first, then allies, then enemies; dead tanks' labels stay put.
-pub fn draw_labels(painter: &egui::Painter, items: &[(&Unit, Pos2)], st: &ViewSettings, icon_r: f32, font: &FontId) {
-    if !st.label_player && !st.label_tank {
-        return;
-    }
+pub fn draw_labels(painter: &egui::Painter, items: &[(&Unit, Pos2)], st: &ViewSettings, icon_r: f32, font: &FontId, crit_icons: &HashMap<(String, u8), egui::TextureId>) {
     let mut order: Vec<&(&Unit, Pos2)> = items.iter().collect();
     order.sort_by_key(|(u, _)| (!u.alive, !u.is_recorder, !u.is_ally));
     let line_h = font.size + 1.0;
@@ -585,13 +584,25 @@ pub fn draw_labels(painter: &egui::Painter, items: &[(&Unit, Pos2)], st: &ViewSe
         if st.label_tank && !u.tank.is_empty() {
             lines.push(&u.tank);
         }
-        if lines.is_empty() {
+        // Damaged / destroyed modules and crew (alive tanks only), shown above the names.
+        let crits: Vec<(egui::TextureId, bool)> = u
+            .crits
+            .iter()
+            .filter_map(|(k, s)| {
+                let crew = matches!(k.as_str(), "commander" | "driver" | "gunner" | "loader" | "radioman");
+                Some((*crit_icons.get(&(k.clone(), *s)).or_else(|| crit_icons.get(&(k.clone(), 2)))?, crew))
+            })
+            .collect();
+        if lines.is_empty() && crits.is_empty() {
             continue;
         }
+        let icon_px = (font.size * 1.25).round();
+        let crit_h = if crits.is_empty() { 0.0 } else { icon_px + 2.0 };
         let fade = if matches!(u.visibility, Visibility::LastKnown { .. }) { 0.42 } else { 1.0 };
         let color = if !u.alive { Color32::from_gray(120) } else { (if u.is_ally { ALLY_LABEL } else { ENEMY_LABEL }).gamma_multiply(fade) };
         let w = lines.iter().map(|l| painter.layout_no_wrap(l.to_string(), font.clone(), color).size().x).fold(0.0, f32::max);
-        let size = Vec2::new(w, lines.len() as f32 * line_h);
+        let w = w.max(crits.len() as f32 * (icon_px + 1.0));
+        let size = Vec2::new(w, lines.len() as f32 * line_h + crit_h);
         let usual = Rect::from_min_size(Pos2::new(p.x + gap, p.y - size.y / 2.0), size);
         let rect = if u.alive {
             // Candidate spots, nearest first: right, left, above, below, then further out.
@@ -631,8 +642,14 @@ pub fn draw_labels(painter: &egui::Painter, items: &[(&Unit, Pos2)], st: &ViewSe
                 painter.line_segment([*p + dir * (icon_r + 2.0), target], Stroke::new(1.0_f32, color.gamma_multiply(0.7)));
             }
         }
+        for (i, (tex, crew)) in crits.iter().enumerate() {
+            let r = Rect::from_min_size(Pos2::new(rect.left() + i as f32 * (icon_px + 1.0), rect.top()), Vec2::splat(icon_px));
+            // Crew icons have no coloured outline in the game: tint them red ("out").
+            let tint = if *crew { Color32::from_rgb(255, 110, 95) } else { Color32::WHITE };
+            painter.image(*tex, r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), tint);
+        }
         for (i, l) in lines.iter().enumerate() {
-            outlined_text(painter, Pos2::new(rect.left(), rect.top() + (i as f32 + 0.5) * line_h), egui::Align2::LEFT_CENTER, l, font.clone(), color);
+            outlined_text(painter, Pos2::new(rect.left(), rect.top() + crit_h + (i as f32 + 0.5) * line_h), egui::Align2::LEFT_CENTER, l, font.clone(), color);
         }
     }
 }

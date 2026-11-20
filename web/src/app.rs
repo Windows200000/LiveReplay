@@ -94,6 +94,9 @@ impl Assets for WebAssets {
     fn icon(&self, icon: livereplay::viewer::theme::Icon) -> Option<dds::Image> {
         self.icons.as_ref()?.get(icon)
     }
+    fn crit_icon(&self, kind: &str, state: u8) -> Option<dds::Image> {
+        self.icons.as_ref()?.crit(kind, state)
+    }
 }
 
 enum Ev {
@@ -289,7 +292,7 @@ impl WebApp {
         fetch::get(ctx, format!("/api/battles/{id}/data?gen=0&from=0"), codes, self.tx.clone(), move |r| Ev::Data(serial, r));
         if self.icons_state == 0 {
             self.icons_state = 1;
-            fetch::get(ctx, "/api/assets/icons".into(), String::new(), self.tx.clone(), |r| {
+            fetch::get(ctx, format!("/api/assets/{}", livereplay::net::ICONS_ASSET), String::new(), self.tx.clone(), |r| {
                 Ev::Icons(r.ok().filter(|r| r.ok()).and_then(|r| decode_pack(&r.body)))
             });
         }

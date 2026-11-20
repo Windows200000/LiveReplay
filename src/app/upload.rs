@@ -242,7 +242,7 @@ impl Worker {
     }
 
     fn ensure_assets(&mut self, engine: &Engine, map: &str, version: &str) -> Result<(), String> {
-        for name in [api::map_asset(map), "icons".to_string()] {
+        for name in [api::map_asset(map), crate::net::ICONS_ASSET.to_string()] {
             if !self.checked.insert(name.clone()) {
                 continue;
             }
@@ -258,7 +258,7 @@ impl Worker {
             if have.as_deref() == Some(version) {
                 continue;
             }
-            let body = if name == "icons" {
+            let body = if name == crate::net::ICONS_ASSET {
                 crate::net::encode_pack(&crate::net::icon_pack(&engine.game))
             } else {
                 match crate::net::map_pack(&engine.game, map) {

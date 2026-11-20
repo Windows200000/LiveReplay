@@ -20,6 +20,10 @@ pub trait Assets: Send + Sync {
     fn icon(&self, _icon: super::theme::Icon) -> Option<crate::gamedata::dds::Image> {
         None
     }
+    /// The game's crit icon for a module / crew kind (state 1 = damaged, 2 = destroyed).
+    fn crit_icon(&self, _kind: &str, _state: u8) -> Option<crate::gamedata::dds::Image> {
+        None
+    }
 }
 
 /// What a 3D scene needs: map + game mode (objects differ per mode), tanks, map-event prefabs.
@@ -97,6 +101,9 @@ pub struct ReplayViewer {
     pub pin: Option<i32>,
     pub follow_at_start: Option<i32>,
     icons: super::theme::IconTextures,
+    /// Crit icons by (kind, state).
+    crit_tex: Vec<((String, u8), egui::TextureHandle)>,
+    crit_ids: std::collections::HashMap<(String, u8), egui::TextureId>,
 }
 
 /// In-game style "Base capture (37)" bar under the top bar, one per base being captured.
@@ -452,6 +459,10 @@ pub mod native {
             self.0.game.gui_icon(icon.game_path()?)
         }
 
+        fn crit_icon(&self, kind: &str, state: u8) -> Option<crate::gamedata::dds::Image> {
+            crate::gamedata::models::png_image(&self.0.game.gui_file(&super::super::theme::crit_icon_path(kind, state))?)
+        }
+
         fn request_3d(&self, req: Request3D, tx: mpsc::Sender<Result<Scene3D, String>>) {
             let engine = self.0.clone();
             std::thread::spawn(move || {
@@ -606,6 +617,8 @@ impl ReplayViewer {
             pin: None,
             follow_at_start: None,
             icons: Default::default(),
+            crit_tex: Vec::new(),
+            crit_ids: Default::default(),
         }
     }
 
@@ -684,6 +697,18 @@ impl ReplayViewer {
                     };
                     if self.live_follow.is_some() {
                         self.live_follow = Some(true);
+                    }
+                    if self.crit_tex.is_empty() {
+                        for kind in super::theme::CRIT_KINDS {
+                            for state in [1u8, 2] {
+                                if let Some(img) = assets.crit_icon(kind, state) {
+                                    let ci = egui::ColorImage::from_rgba_unmultiplied([img.width, img.height], &img.rgba);
+                                    let h = ctx.load_texture(format!("crit-{kind}-{state}"), ci, egui::TextureOptions::LINEAR);
+                                    self.crit_ids.insert((kind.to_string(), state), h.id());
+                                    self.crit_tex.push(((kind.to_string(), state), h));
+                                }
+                            }
+                        }
                     }
                     if self.icons.is_empty() {
                         for ic in super::theme::Icon::ALL {
@@ -1026,6 +1051,7 @@ impl ReplayViewer {
             recorder_team: battle.recorder_team,
             captures: &captures,
             camera: None,
+            crit_icons: &self.crit_ids,
         };
         let mut out = None;
         let mut out_mini = None;

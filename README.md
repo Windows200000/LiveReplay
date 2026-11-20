@@ -100,10 +100,6 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 #### Viewer
 
 
-- [ ] Damaged / destroyed modules and crew above the name labels (alive tanks only; orange = damaged, red = destroyed) with the
-      game's crit icons (`gui/maps/icons/library/crits/*`) — icons shown to the user for approval. Data found in replays: track hits
-      for every tank in view (`onExtraHitted`), enemy modules only with `showOtherVehicleDamagedDevices` (not in recent replays);
-      own-tank module/crew states not found yet (two packet types still undecoded) — waiting for the user's decision
 
 
 - [ ] (On hold — user chose simple, non-repeating textures) 3D object textures as the game's real look, baked: per model, combine its actual material textures the way the
@@ -118,6 +114,11 @@ Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
       Until then uploads from the app fail with a network error (uploading is off by default)
 
 ### Done
+- Damaged / destroyed modules and crew above the name labels (alive tanks only, 2D and 3D), with the game's crit icons
+  (orange outline = damaged, red = destroyed; crew tinted red). What replays contain: track hits for every tank in view
+  (shown until the tank drives again), and enemy modules / crew when the recording player got that information
+  (`showOtherVehicleDamagedDevices`). Module numbering is read from the game (`vehicle.xml` extras). Own-tank module / crew
+  states are not recorded in replays at all (checked every message and packet type)
 - Web viewer download: Brotli-compressed by the server (1.22 MB instead of 1.52 MB gzipped; wasm-opt also runs in the Docker build)
 - eframe/egui 0.28 -> 0.29 (winit 0.30): macOS builds on current stable Rust again (the old objc2 0.4 is gone)
 - Labels never overlap for alive tanks (2D and 3D): own tank first, then allies, then enemies; a label that doesn't fit next

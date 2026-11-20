@@ -320,6 +320,27 @@ impl GameData {
         arena.minimap_layers.iter().filter_map(|p| Some((p.clone(), self.read(&pkg, p)?))).collect()
     }
 
+    /// Vehicle "extras" by index as the server numbers them (`onExtraHitted`,
+    /// `showOtherVehicleDamagedDevices`): (slot name, kind) for modules and crew, e.g.
+    /// ("leftTrack0Health", "track"), ("loader1Health", "loader"); other extras are None.
+    /// Read from `item_defs/vehicles/common/vehicle.xml` (index = position in `extras` + 1).
+    pub fn vehicle_extras(&self) -> Vec<Option<(String, String)>> {
+        let Some(root) = self.script_xml("scripts/item_defs/vehicles/common/vehicle.xml") else { return Vec::new() };
+        let mut kinds = std::collections::HashMap::new();
+        if let Some(de) = root.child("deviceExtras") {
+            for group in ["devices", "tankmen"] {
+                for n in de.child(group).map(|g| g.children.iter()).into_iter().flatten() {
+                    kinds.insert(n.name.clone(), n.text().trim().to_string());
+                }
+            }
+        }
+        let mut out = vec![None];
+        for n in root.child("extras").map(|e| e.children.iter()).into_iter().flatten() {
+            out.push(kinds.get(&n.name).map(|k| (n.name.clone(), k.clone())));
+        }
+        out
+    }
+
     /// Stock-config hit points of a vehicle type (`nation:tag`): hull + strongest turret.
     pub fn vehicle_max_health(&self, vehicle_type: &str) -> Option<i32> {
         let (nation, tag) = vehicle_type.split_once(':')?;

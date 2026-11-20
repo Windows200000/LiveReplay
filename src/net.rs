@@ -22,13 +22,22 @@ pub struct MapPack {
     pub layers: Vec<(String, Vec<u8>)>,
 }
 
-/// Stat icons (index into `Icon::ALL`, image).
+/// Stat icons (index into `Icon::ALL`, image) and crit icons ((kind, state), image).
 #[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct IconPack {
     pub icons: Vec<(u8, u32, u32, Vec<u8>)>,
+    pub crits: Vec<(String, u8, u32, u32, Vec<u8>)>,
 }
 
+/// Server asset name of the icon pack.
+pub const ICONS_ASSET: &str = "icons2";
+
 impl IconPack {
+    pub fn crit(&self, kind: &str, state: u8) -> Option<Image> {
+        self.crits.iter().find(|c| c.0 == kind && c.1 == state).map(|c| Image { width: c.2 as usize, height: c.3 as usize, rgba: c.4.clone() })
+    }
+
     pub fn get(&self, icon: crate::viewer::theme::Icon) -> Option<Image> {
         let i = crate::viewer::theme::Icon::ALL.iter().position(|x| *x == icon)? as u8;
         self.icons.iter().find(|x| x.0 == i).map(|x| Image { width: x.1 as usize, height: x.2 as usize, rgba: x.3.clone() })
@@ -61,7 +70,15 @@ pub fn icon_pack(game: &crate::gamedata::GameData) -> IconPack {
             Some((i as u8, img.width as u32, img.height as u32, img.rgba))
         })
         .collect();
-    IconPack { icons }
+    let mut crits = Vec::new();
+    for kind in crate::viewer::theme::CRIT_KINDS {
+        for state in [1u8, 2] {
+            if let Some(img) = game.gui_file(&crate::viewer::theme::crit_icon_path(kind, state)).and_then(|b| crate::gamedata::models::png_image(&b)) {
+                crits.push((kind.to_string(), state, img.width as u32, img.height as u32, img.rgba));
+            }
+        }
+    }
+    IconPack { icons, crits }
 }
 
 pub fn sha256_hex(data: &[u8]) -> String {

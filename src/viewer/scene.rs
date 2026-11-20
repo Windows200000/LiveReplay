@@ -20,6 +20,8 @@ pub struct Unit {
     pub is_recorder: bool,
     /// Another uploader's tank in a merged battle (gets its own view-range circle).
     pub is_viewpoint: bool,
+    /// Damaged (1) / destroyed (2) modules and crew right now: (kind, state), alive tanks only.
+    pub crits: Vec<(String, u8)>,
     pub class: VehicleClass,
     /// World position (x east, y up, z north).
     pub pos: [f32; 3],
@@ -141,6 +143,25 @@ fn turret_at(rec: &VehicleRec, t: f32) -> f32 {
     }
 }
 
+/// Modules / crew not working at `t`: the latest state of each slot, one entry per kind (worst state).
+pub fn crits_at(rec: &VehicleRec, t: f32) -> Vec<(String, u8)> {
+    let mut slots: Vec<(&str, &str, u8)> = Vec::new();
+    for c in rec.crits.iter().take_while(|c| c.t <= t) {
+        match slots.iter_mut().find(|s| s.0 == c.slot) {
+            Some(s) => s.2 = c.state,
+            None => slots.push((&c.slot, &c.kind, c.state)),
+        }
+    }
+    let mut out: Vec<(String, u8)> = Vec::new();
+    for (_, kind, state) in slots.into_iter().filter(|s| s.2 > 0) {
+        match out.iter_mut().find(|o| o.0 == kind) {
+            Some(o) => o.1 = o.1.max(state),
+            None => out.push((kind.to_string(), state)),
+        }
+    }
+    out
+}
+
 pub fn units_at(b: &Battle, t: f32, include_last_known: bool) -> Vec<Unit> {
     let mut out = Vec::new();
     for rec in b.vehicles.values() {
@@ -166,6 +187,7 @@ pub fn units_at(b: &Battle, t: f32, include_last_known: bool) -> Vec<Unit> {
             is_ally,
             is_recorder: Some(rec.id) == b.recorder_vehicle,
             is_viewpoint: b.viewpoints.contains(&rec.id),
+            crits: if alive { crits_at(rec, t) } else { Vec::new() },
             class: rec.class.unwrap_or(VehicleClass::Unknown),
             pos,
             yaw,

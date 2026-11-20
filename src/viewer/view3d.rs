@@ -880,7 +880,7 @@ impl BattleView for View3D {
             };
             draw_marker(&painter, p, u, st, icon_r, &font, highlight, true);
         }
-        super::minimap2d::draw_labels(&painter, &placed, st, icon_r, &font);
+        super::minimap2d::draw_labels(&painter, &placed, st, icon_r, &font, input.crit_icons);
         out.hovered = hovered_here;
         if response.clicked() {
             match out.hovered {
