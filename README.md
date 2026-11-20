@@ -100,7 +100,10 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 #### Viewer
 
 
-- [ ] Display settings panel: redesigned as one table (setting | 2D | 3D, On/Off chips) — user to check
+- [ ] Damaged / destroyed modules and crew above the name labels (alive tanks only; orange = damaged, red = destroyed) with the
+      game's crit icons (`gui/maps/icons/library/crits/*`) — icons shown to the user for approval. Data found in replays: track hits
+      for every tank in view (`onExtraHitted`), enemy modules only with `showOtherVehicleDamagedDevices` (not in recent replays);
+      own-tank module/crew states not found yet (two packet types still undecoded) — waiting for the user's decision
 
 
 - [ ] (On hold — user chose simple, non-repeating textures) 3D object textures as the game's real look, baked: per model, combine its actual material textures the way the
