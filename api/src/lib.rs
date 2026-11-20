@@ -14,6 +14,8 @@
 //! - `POST /api/codes` K: [`NewCode`] -> [`CodeInfo`];  `DELETE /api/codes/{code}` K
 //!   A code shows the live battles uploaded with the key that created it. The server stores only
 //!   a hash of each code, so the code itself says nothing about whose it is.
+//! - `PUT /api/battles/{id}/replay` K: the original .wotreplay file (kept private: never served to
+//!   others; `GET` with the owner's key downloads it)
 //! - `GET /api/me` K -> [`MyData`];  `DELETE /api/me` K: delete everything of this uploader;
 //!   `DELETE /api/battles/{id}` K: delete one battle (GDPR access / erasure)
 //! - `DELETE /api/admin/players/{name}` with [`ADMIN_HEADER`]: remove every battle a player is in
@@ -97,6 +99,8 @@ pub struct BattleInfo {
     pub gen: u32,
     /// Unix seconds of the last upload.
     pub updated: u64,
+    /// Size of the stored original replay file (0 = none).
+    pub replay_size: u64,
     /// Same battle uploaded by several players: all of them share this group id (empty = alone).
     pub group: String,
 }

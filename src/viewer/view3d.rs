@@ -870,7 +870,7 @@ impl BattleView for View3D {
             placed.push((u, p));
         }
         let hovered_here = best.map(|b| b.1);
-        for (u, p) in placed {
+        for &(u, p) in &placed {
             let highlight = if input.selected == Some(u.id) {
                 Highlight::Selected
             } else if input.hovered == Some(u.id) || hovered_here == Some(u.id) {
@@ -880,6 +880,7 @@ impl BattleView for View3D {
             };
             draw_marker(&painter, p, u, st, icon_r, &font, highlight, true);
         }
+        super::minimap2d::draw_labels(&painter, &placed, st, icon_r, &font);
         out.hovered = hovered_here;
         if response.clicked() {
             match out.hovered {

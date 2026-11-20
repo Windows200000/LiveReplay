@@ -450,6 +450,10 @@ impl BattleView for Minimap2D {
             };
             draw_marker(&map_painter, p, u, st, icon_r, &label_font, highlight, !small);
         }
+        if !small {
+            let items: Vec<(&Unit, Pos2)> = input.units.iter().zip(points.iter().copied()).collect();
+            draw_labels(&map_painter, &items, st, icon_r, &label_font);
+        }
 
         out.hovered = best.map(|b| b.1);
         // Click or drag: the world position under the pointer (moves the 3D camera).
@@ -559,18 +563,76 @@ pub fn draw_marker(
     if let Some((dmg, a)) = u.damage_popup {
         outlined_text(painter, p - Vec2::new(0.0, lift), egui::Align2::CENTER_BOTTOM, &format!("-{dmg}"), FontId::proportional(label_font.size * 1.05), Color32::WHITE.gamma_multiply(a));
     }
-    let mut lines: Vec<&str> = Vec::new();
-    if st.label_player {
-        lines.push(&u.player);
+}
+
+/// Player / tank name labels. Labels of alive tanks never overlap each other (markers may): a label
+/// that doesn't fit at its usual place right of the marker moves to the nearest free spot and gets
+/// a thin line to its tank. Own tank first, then allies, then enemies; dead tanks' labels stay put.
+pub fn draw_labels(painter: &egui::Painter, items: &[(&Unit, Pos2)], st: &ViewSettings, icon_r: f32, font: &FontId) {
+    if !st.label_player && !st.label_tank {
+        return;
     }
-    if st.label_tank {
-        lines.push(&u.tank);
-    }
-    let text_color = if !u.alive { Color32::from_gray(120) } else { (if u.is_ally { ALLY_LABEL } else { ENEMY_LABEL }).gamma_multiply(fade) };
-    let line_h = label_font.size + 1.0;
-    let x = p.x + icon_r + 7.0;
-    let y0 = p.y - (lines.len() as f32 - 1.0) * line_h / 2.0;
-    for (i, l) in lines.iter().enumerate() {
-        outlined_text(painter, Pos2::new(x, y0 + i as f32 * line_h), egui::Align2::LEFT_CENTER, l, label_font.clone(), text_color);
+    let mut order: Vec<&(&Unit, Pos2)> = items.iter().collect();
+    order.sort_by_key(|(u, _)| (!u.alive, !u.is_recorder, !u.is_ally));
+    let line_h = font.size + 1.0;
+    let gap = icon_r + 7.0;
+    let mut taken: Vec<Rect> = Vec::new();
+    for (u, p) in order {
+        let mut lines: Vec<&str> = Vec::new();
+        if st.label_player && !u.player.is_empty() {
+            lines.push(&u.player);
+        }
+        if st.label_tank && !u.tank.is_empty() {
+            lines.push(&u.tank);
+        }
+        if lines.is_empty() {
+            continue;
+        }
+        let fade = if matches!(u.visibility, Visibility::LastKnown { .. }) { 0.42 } else { 1.0 };
+        let color = if !u.alive { Color32::from_gray(120) } else { (if u.is_ally { ALLY_LABEL } else { ENEMY_LABEL }).gamma_multiply(fade) };
+        let w = lines.iter().map(|l| painter.layout_no_wrap(l.to_string(), font.clone(), color).size().x).fold(0.0, f32::max);
+        let size = Vec2::new(w, lines.len() as f32 * line_h);
+        let usual = Rect::from_min_size(Pos2::new(p.x + gap, p.y - size.y / 2.0), size);
+        let rect = if u.alive {
+            // Candidate spots, nearest first: right, left, above, below, then further out.
+            let mut cands: Vec<(f32, Rect)> = Vec::new();
+            for k in 0..=10 {
+                let dy = k as f32 * line_h * 0.55;
+                for sy in [1.0f32, -1.0] {
+                    if k == 0 && sy < 0.0 {
+                        continue;
+                    }
+                    let y = p.y - size.y / 2.0 + sy * dy;
+                    cands.push((dy, Rect::from_min_size(Pos2::new(p.x + gap, y), size)));
+                    cands.push((dy + 4.0, Rect::from_min_size(Pos2::new(p.x - gap - size.x, y), size)));
+                }
+                let d = k as f32 * line_h * 0.7;
+                cands.push((size.y / 2.0 + gap + d, Rect::from_min_size(Pos2::new(p.x - size.x / 2.0, p.y - gap - size.y - d), size)));
+                cands.push((size.y / 2.0 + gap + d + 2.0, Rect::from_min_size(Pos2::new(p.x - size.x / 2.0, p.y + gap + d), size)));
+                for sx in [1.0f32, -1.0] {
+                    let x = if sx > 0.0 { p.x + gap + d * 1.5 } else { p.x - gap - size.x - d * 1.5 };
+                    cands.push((d * 1.5 + 6.0, Rect::from_min_size(Pos2::new(x, p.y - size.y / 2.0 - d), size)));
+                    cands.push((d * 1.5 + 6.0, Rect::from_min_size(Pos2::new(x, p.y - size.y / 2.0 + d), size)));
+                }
+            }
+            cands.sort_by(|a, b| a.0.total_cmp(&b.0));
+            cands.into_iter().map(|c| c.1).find(|r| !taken.iter().any(|t| t.intersects(*r))).unwrap_or(usual)
+        } else {
+            usual
+        };
+        if u.alive {
+            taken.push(rect.expand(1.0));
+        }
+        if rect != usual {
+            // Leader line from the marker's edge to the nearest point of the label.
+            let target = Pos2::new(p.x.clamp(rect.left(), rect.right()), p.y.clamp(rect.top(), rect.bottom()));
+            let dir = (target - *p).normalized();
+            if (target - *p).length() > icon_r + 4.0 {
+                painter.line_segment([*p + dir * (icon_r + 2.0), target], Stroke::new(1.0_f32, color.gamma_multiply(0.7)));
+            }
+        }
+        for (i, l) in lines.iter().enumerate() {
+            outlined_text(painter, Pos2::new(rect.left(), rect.top() + (i as f32 + 0.5) * line_h), egui::Align2::LEFT_CENTER, l, font.clone(), color);
+        }
     }
 }

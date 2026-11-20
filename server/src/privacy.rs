@@ -39,6 +39,9 @@ a {{ color: #8fd14f; }} code {{ background: #2a2c30; padding: 1px 5px; border-ra
 map, time, game mode, the tanks and how they moved and fought, and for every player in the battle their
 <b>player name, clan tag, Wargaming account ID, team, tank and the full battle results</b> from the replay's
 results (damage, kills, XP, credits and the other per-player statistics the game records).</li>
+<li><b>The original replay file</b> of each uploaded battle, as the game wrote it (it also contains the battle chat and the
+uploader's own detailed results). It is kept so that features can later show more of the battle; it is not shown or given
+to anyone except the uploader, and is deleted with the battle.</li>
 <li><b>Uploaders:</b> a random key created by the app (stored only as a hash) and the player names that key uploads for.</li>
 <li><b>Live viewing codes:</b> stored only as a hash, with the key that made them and their expiry date. Expired codes are deleted.</li>
 <li><b>Game data</b> (map pictures, 3D models, icons) uploaded by the app from the player's game files. No personal data.</li>

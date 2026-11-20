@@ -28,6 +28,8 @@ mod privacy;
 const STALE_SECS: u64 = 30 * 60;
 const MAX_BODY: usize = 16 << 20;
 const MAX_ASSET: usize = 64 << 20;
+/// Largest original replay file accepted.
+const MAX_REPLAY: usize = 64 << 20;
 const MAX_BATTLE: u64 = 24 << 20;
 const PER_PAGE: usize = 50;
 /// Abuse limits per uploader key (overridable: `MAX_BATTLES_PER_DAY`, `MAX_KEY_MB`, `MAX_TOTAL_GB`).
@@ -192,6 +194,7 @@ impl App {
         let dir = self.data.join("battles");
         let _ = std::fs::remove_file(dir.join(format!("{id}.bin")));
         let _ = std::fs::remove_file(dir.join(format!("{id}.json")));
+        let _ = std::fs::remove_file(dir.join(format!("{id}.wotreplay")));
         st.battles.remove(id).is_some()
     }
 
@@ -379,6 +382,49 @@ fn route(app: &App, rq: &mut Request) -> Reply {
             }
         }
         (Method::Post, ["api", "battles", id, "frames"]) => frames(app, rq, id, q),
+        (Method::Put, ["api", "battles", id, "replay"]) => {
+            let Some(owner) = key_hash(rq) else { return Reply::err(401, "key required") };
+            let body = match read_body_max(rq, MAX_REPLAY) {
+                Ok(b) => b,
+                Err(e) => return e,
+            };
+            // A replay file starts with the magic 0x11343212.
+            if body.len() < 12 || body[..4] != [0x12, 0x32, 0x34, 0x11] {
+                return Reply::err(400, "not a replay file");
+            }
+            let mut st = app.state.lock().unwrap();
+            let used: u64 = st.battles.values().filter(|s| s.owner == owner).map(|s| s.info.size + s.info.replay_size).sum();
+            let total: u64 = st.battles.values().map(|s| s.info.size + s.info.replay_size).sum();
+            let Some(s) = st.battles.get_mut(*id) else { return Reply::err(404, "not found") };
+            if s.owner != owner {
+                return Reply::err(403, "not yours");
+            }
+            let extra = (body.len() as u64).saturating_sub(s.info.replay_size);
+            if used + extra > env_num("MAX_KEY_MB", KEY_MB) << 20 || total + extra > env_num("MAX_TOTAL_GB", TOTAL_GB) << 30 {
+                return Reply::err(507, "storage limit reached");
+            }
+            let path = app.data.join("battles").join(format!("{id}.wotreplay"));
+            let tmp = path.with_extension("tmp");
+            if std::fs::write(&tmp, &body).and_then(|_| std::fs::rename(&tmp, &path)).is_err() {
+                return Reply::err(500, "write failed");
+            }
+            s.info.replay_size = body.len() as u64;
+            let s = s.clone();
+            app.save_battle(&s);
+            Reply::json(&s.info)
+        }
+        (Method::Get, ["api", "battles", id, "replay"]) => {
+            // Only for the uploader (GDPR access); never public.
+            let Some(owner) = key_hash(rq) else { return Reply::err(401, "key required") };
+            let mine = app.state.lock().unwrap().battles.get(*id).is_some_and(|s| s.owner == owner);
+            if !mine {
+                return Reply::err(404, "not found");
+            }
+            match std::fs::read(app.data.join("battles").join(format!("{id}.wotreplay"))) {
+                Ok(b) => Reply::bin(b).header("Content-Disposition", format!("attachment; filename=\"{id}.wotreplay\"")),
+                Err(_) => Reply::err(404, "no replay file"),
+            }
+        }
         (Method::Get, ["api", "battles", id, "data"]) => data(app, rq, id, q),
         (Method::Get, ["api", "live"]) => {
             let st = app.state.lock().unwrap();
@@ -530,6 +576,7 @@ fn new_battle(app: &App, rq: &mut Request) -> Reply {
         gen: 1,
         updated: now(),
         group: String::new(),
+        replay_size: 0,
     };
     let mut info = info;
     // Another player's upload of the same battle: same realm, map and day, shared tanks.
@@ -571,8 +618,8 @@ fn frames(app: &App, rq: &mut Request, id: &str, q: &str) -> Reply {
     let reset = query(q, "reset").is_some();
     let mut st = app.state.lock().unwrap();
     // Storage limits: per uploader and for the whole server.
-    let total: u64 = st.battles.values().map(|s| s.info.size).sum();
-    let mine: u64 = st.battles.values().filter(|s| s.owner == owner).map(|s| s.info.size).sum();
+    let total: u64 = st.battles.values().map(|s| s.info.size + s.info.replay_size).sum();
+    let mine: u64 = st.battles.values().filter(|s| s.owner == owner).map(|s| s.info.size + s.info.replay_size).sum();
     if mine + body.len() as u64 > env_num("MAX_KEY_MB", KEY_MB) << 20 {
         return Reply::err(507, "storage limit for this uploader reached");
     }

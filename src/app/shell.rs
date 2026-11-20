@@ -52,7 +52,7 @@ enum CodeOp {
 
 /// What uploading means, shown before the first upload (and in Settings).
 const UPLOAD_NOTICE: &str = "Uploaded battles are public on wot.arne.my once they are over, including the names, clan tags, \
-account IDs and battle results of all players in them. A live battle is only visible to people with one of your viewing codes \
+account IDs and battle results of all players in them. The original replay file is stored too, but not shown to anyone. A live battle is only visible to people with one of your viewing codes \
 until it ends. You can delete your uploads at any time (Settings > Server, or right-click a replay).";
 
 impl Default for App {

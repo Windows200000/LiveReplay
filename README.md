@@ -117,6 +117,10 @@ Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
 - [ ] Smaller web bundle: 1.4 MB gzipped before wasm-opt (the Docker build runs wasm-opt -Oz); next steps if needed: Brotli, fewer egui fonts
 
 ### Done
+- Labels never overlap for alive tanks (2D and 3D): own tank first, then allies, then enemies; a label that doesn't fit next
+  to its marker moves to the nearest free spot with a thin line to its tank (markers may overlap)
+- Uploads keep everything: the original .wotreplay is stored next to the compact battle (private: only the uploader can
+  download it, deleted with the battle, counted in the storage limits; privacy policy updated)
 - Server data can live in a host folder (`DATA_PATH` in `.env`, e.g. on another drive) instead of the Docker volume
 - UI scale is a slider again and applies live: while dragging, the slider stays where it was on screen at its original size and
   everything else rescales; also Ctrl + mouse wheel and Ctrl +/- (viewer and replay list); sliders show their filled bar again

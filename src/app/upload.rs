@@ -319,6 +319,10 @@ impl Worker {
         self.ensure_assets(&engine, &battle.map, &version)?;
         let damage = super::library::summarize(path, Some(&engine.game)).map(|e| e.damage).unwrap_or(0);
         post_bytes(&self.cfg.upload_key, &format!("/api/battles/{id}/frames?reset=1&finish=1&damage={damage}"), &wire::encode_frame(&battle, 0.0))?;
+        // The original replay file too (kept private on the server, for features that need more of it later).
+        if let Ok(raw) = std::fs::read(path) {
+            agent().put(&format!("{}/api/battles/{id}/replay", server_url())).set(api::KEY_HEADER, &self.cfg.upload_key).send_bytes(&raw).map_err(err)?;
+        }
         remember(&file_name(path), &id);
         // 3D data for the web viewer (after the battle only: building it is heavy).
         if let Err(e) = self.ensure_3d(&engine, &battle, &version) {
