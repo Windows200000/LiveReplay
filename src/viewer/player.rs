@@ -182,6 +182,9 @@ fn ui_scale_slider(ui: &mut egui::Ui, scale: &mut f32) -> bool {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(170.0, 20.0), egui::Sense::click_and_drag());
     let before = *scale;
     // (slider rectangle in physical pixels, pixels per point when the drag started)
+    let ppp_key = egui::Id::new("ui_scale_prev_ppp");
+    let prev_ppp: f32 = ctx.data(|d| d.get_temp(ppp_key)).unwrap_or(ppp);
+    ctx.data_mut(|d| d.insert_temp(ppp_key, ppp));
     let mut drag: Option<([f32; 4], f32)> = ctx.data(|d| d.get_temp(key));
     // Released: back to the normal slider in this same frame.
     if drag.is_some() && !ctx.input(|i| i.pointer.primary_down()) {
@@ -198,9 +201,11 @@ fn ui_scale_slider(ui: &mut egui::Ui, scale: &mut f32) -> bool {
         Some((px, p0)) => {
             // Only real mouse moves count: the remembered pointer position is in points of the
             // scale it was recorded at, so re-reading it after a rescale would make the value jump.
+            // The events of this frame were converted to points with the scale of the previous
+            // frame (a new scale only takes effect when the frame starts), so convert back with that.
             let moved = ctx.input(|i| i.events.iter().rev().find_map(|e| if let egui::Event::PointerMoved(p) = e { Some(*p) } else { None }));
             if let Some(pos) = moved {
-                *scale = value_at(px, pos.x * ppp);
+                *scale = value_at(px, pos.x * prev_ppp);
             }
             // Drawn on top at the same physical position and size as when the drag started, laid
             // out in whole screen pixels so nothing shifts by a sub-pixel when the scale changes.
@@ -227,7 +232,7 @@ fn ui_scale_slider(ui: &mut egui::Ui, scale: &mut f32) -> bool {
             let px = [(rect.left() * ppp).round(), (rect.top() * ppp).round(), (rect.right() * ppp).round(), (rect.bottom() * ppp).round()];
             if resp.is_pointer_button_down_on() {
                 if let Some(pos) = resp.interact_pointer_pos() {
-                    *scale = value_at(px, pos.x * ppp);
+                    *scale = value_at(px, pos.x * prev_ppp);
                 }
                 ctx.data_mut(|d| d.insert_temp(key, (px, ppp)));
             }
