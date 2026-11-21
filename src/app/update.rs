@@ -1,8 +1,10 @@
 //! New versions: checks the latest GitHub release (not the rolling `latest-build`), tells the
-//! user, and on Windows replaces the running exe with the new one (used from the next start).
+//! user, and replaces the running program with the new one (used from the next start).
 //!
 //! The download is checked before it is used: the size and SHA-256 digest GitHub lists for the
-//! file, and that it is a Windows program. The old exe is kept as `<name>.old` until the next start.
+//! file, and that it is a program for this system. Windows: the old exe is kept as `<name>.old`
+//! until the next start (a running exe can be renamed, not overwritten). macOS / Linux: the
+//! `livereplay` file from the release's `.tar.gz` replaces the running one (allowed there).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -49,15 +51,53 @@ struct Release {
     sha256: Option<String>,
 }
 
-/// This build's file on the release page (self-update is for Windows only).
+/// This build's file on the release page.
 fn asset_name() -> Option<&'static str> {
-    if !cfg!(windows) {
-        None
-    } else if cfg!(target_arch = "aarch64") {
-        Some("livereplay-windows-arm64.exe")
+    let arm = cfg!(target_arch = "aarch64");
+    if cfg!(windows) {
+        Some(if arm { "livereplay-windows-arm64.exe" } else { "livereplay-windows-x64.exe" })
+    } else if cfg!(target_os = "macos") {
+        Some(if arm { "livereplay-macos-arm64.tar.gz" } else { "livereplay-macos-x64.tar.gz" })
+    } else if cfg!(target_os = "linux") {
+        Some(if arm { "livereplay-linux-arm64.tar.gz" } else { "livereplay-linux-x64.tar.gz" })
     } else {
-        Some("livereplay-windows-x64.exe")
+        None
     }
+}
+
+/// The `livereplay` program inside a release `.tar.gz` (one file; tar read by hand).
+fn from_tar_gz(gz: &[u8]) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut tar = Vec::new();
+    flate2::read::GzDecoder::new(gz).take(512 << 20).read_to_end(&mut tar).map_err(|_| "the download is not a .tar.gz")?;
+    let mut at = 0;
+    while at + 512 <= tar.len() {
+        let h = &tar[at..at + 512];
+        let name = String::from_utf8_lossy(&h[..100]).trim_end_matches('\0').to_string();
+        if name.is_empty() {
+            break;
+        }
+        let size = usize::from_str_radix(String::from_utf8_lossy(&h[124..136]).trim_matches(|c: char| c == '\0' || c == ' '), 8).map_err(|_| "broken .tar.gz")?;
+        let data = tar.get(at + 512..at + 512 + size).ok_or("broken .tar.gz")?;
+        let regular = h[156] == b'0' || h[156] == 0;
+        if regular && name.trim_start_matches("./") == "livereplay" {
+            return Ok(data.to_vec());
+        }
+        at += 512 + size.div_ceil(512) * 512;
+    }
+    Err("no livereplay program in the download".into())
+}
+
+/// A program for this system: Windows PE, Linux ELF, macOS Mach-O.
+fn is_program(b: &[u8]) -> bool {
+    b.len() > 1 << 20
+        && if cfg!(windows) {
+            b.starts_with(b"MZ")
+        } else if cfg!(target_os = "macos") {
+            [[0xcf, 0xfa, 0xed, 0xfe], [0xfe, 0xed, 0xfa, 0xcf], [0xca, 0xfe, 0xba, 0xbe]].iter().any(|m| b.starts_with(m))
+        } else {
+            b.starts_with(b"\x7fELF")
+        }
 }
 
 fn numbers(v: &str) -> Vec<u64> {
@@ -106,14 +146,30 @@ fn install(r: &Release) -> Result<(), String> {
             return Err("download damaged (checksum differs)".into());
         }
     }
-    if body.len() < 1 << 20 || !body.starts_with(b"MZ") {
-        return Err("the download is not a Windows program".into());
+    let program = if r.url.ends_with(".tar.gz") { from_tar_gz(&body)? } else { body };
+    if !is_program(&program) {
+        return Err("the download is not a program for this system".into());
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    replace_exe(&exe, &body)
+    replace_exe(&exe, &program)
+}
+
+/// macOS / Linux: the new file is written next to it and renamed over it (the running program
+/// keeps its old copy until it ends).
+#[cfg(not(windows))]
+fn replace_exe(exe: &Path, body: &[u8]) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let new = exe.with_extension("new");
+    std::fs::write(&new, body).map_err(|e| format!("can't write next to the app: {e}"))?;
+    std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+    std::fs::rename(&new, exe).map_err(|e| {
+        let _ = std::fs::remove_file(&new);
+        format!("can't replace the app: {e}")
+    })
 }
 
 /// Windows lets a running exe be renamed, not overwritten: current -> `.old`, new -> current.
+#[cfg(windows)]
 fn replace_exe(exe: &Path, body: &[u8]) -> Result<(), String> {
     let new = exe.with_extension("exe.new");
     let old = old_path(exe);
@@ -251,6 +307,27 @@ mod tests {
         assert!(!newer("v1.0.0", "1.0.0"));
         assert!(!newer("v0.9.9", "1.0.0"));
         assert!(!newer("latest-build", "1.0.0"));
+    }
+
+    #[test]
+    fn tar_gz() {
+        // A tar with a README and the program, gzipped.
+        let mut tar = Vec::new();
+        for (name, data) in [("README.md", &b"hello"[..]), ("livereplay", &b"\x7fELF-program"[..])] {
+            let mut h = [0u8; 512];
+            h[..name.len()].copy_from_slice(name.as_bytes());
+            let size = format!("{:011o}\0", data.len());
+            h[124..136].copy_from_slice(size.as_bytes());
+            h[156] = b'0';
+            tar.extend_from_slice(&h);
+            tar.extend_from_slice(data);
+            tar.resize(tar.len().div_ceil(512) * 512, 0);
+        }
+        tar.extend_from_slice(&[0u8; 1024]);
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut gz, &tar).unwrap();
+        assert_eq!(from_tar_gz(&gz.finish().unwrap()).unwrap(), b"\x7fELF-program");
+        assert!(from_tar_gz(b"not gzip").is_err());
     }
 
     #[test]

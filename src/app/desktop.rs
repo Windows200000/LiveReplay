@@ -1,5 +1,5 @@
-//! Windows integration: tray icon, hiding the window to the tray, starting with Windows, one
-//! running copy. Elsewhere these do nothing (the window simply closes).
+//! Desktop integration: tray icon, hiding the window to the tray, starting with the computer, one
+//! running copy (Windows below; macOS and Linux in `unix`).
 //!
 //! While the window is hidden, egui gets no input and the app draws nothing (`hidden()` makes
 //! `update` return at once), so the tray costs next to nothing; the uploader keeps running in its
@@ -26,40 +26,195 @@ pub fn wake() {
     }
 }
 
+/// macOS and Linux: the tray icon (status bar / StatusNotifier), hiding the window with the
+/// window system (it keeps getting redraws there, so nothing spins), start with the computer
+/// (LaunchAgent / XDG autostart), one running copy (a local socket). Wayland cannot hide windows:
+/// there the close button simply quits.
 #[cfg(not(windows))]
-mod other {
+mod unix {
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+
+    use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+    use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
+
+    static IN_TRAY: AtomicBool = AtomicBool::new(false);
+    static TRAY_OK: AtomicBool = AtomicBool::new(false);
+    static SOCKET: Mutex<Option<PathBuf>> = Mutex::new(None);
+    thread_local! {
+        static TRAY: RefCell<Option<TrayIcon>> = const { RefCell::new(None) };
+    }
+
+    pub const TRAY_HINT: &str = if cfg!(target_os = "macos") {
+        "Click the LiveReplay icon in the menu bar to open the window; its menu has Quit"
+    } else {
+        "Left-click the tray icon to open the window, right-click > Quit to end LiveReplay"
+    };
+
+    /// Remember the window's context and put the icon in the tray (macOS: on the main thread, as
+    /// required; Linux: StatusNotifier over D-Bus, its own thread).
     pub fn init(cc: &eframe::CreationContext<'_>) {
+        use raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
         super::set_context(&cc.egui_ctx);
+        let wayland = cc.display_handle().is_ok_and(|d| matches!(d.as_raw(), RawDisplayHandle::Wayland(_)));
+        if wayland {
+            return;
+        }
+        let tray = (|| {
+            let img = eframe::icon_data::from_png_bytes(include_bytes!("../../assets/icon.png")).ok()?;
+            let icon = Icon::from_rgba(img.rgba, img.width, img.height).ok()?;
+            let menu = Menu::new();
+            let quit_item = MenuItem::new("Quit", true, None);
+            menu.append(&quit_item).ok()?;
+            let quit_id = quit_item.id().clone();
+            let tray = TrayIconBuilder::new().with_icon(icon).with_tooltip("LiveReplay").with_menu(Box::new(menu)).with_menu_on_left_click(false).build().ok()?;
+            TrayIconEvent::set_event_handler(Some(|e: TrayIconEvent| {
+                if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = e {
+                    show();
+                }
+            }));
+            MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
+                if e.id == quit_id {
+                    quit();
+                }
+            }));
+            Some(tray)
+        })();
+        TRAY_OK.store(tray.is_some(), Ordering::Relaxed);
+        TRAY.with(|t| *t.borrow_mut() = tray);
     }
-    pub fn hidden() -> bool {
-        false
-    }
-    pub fn hide(_ctx: &egui::Context) {}
+
     pub fn tray_supported() -> bool {
-        false
-    }
-    pub const TRAY_HINT: &str = "";
-    pub fn show() {}
-    pub fn set_tooltip(_text: &str) {}
-    pub fn quit() -> ! {
-        std::process::exit(0)
-    }
-    pub fn tray_available() -> bool {
-        false
-    }
-    pub fn set_autostart(_on: bool) -> Result<(), String> {
-        Ok(())
-    }
-    pub fn first_instance() -> bool {
         true
     }
-    pub fn release_instance() {}
+
+    pub fn tray_available() -> bool {
+        TRAY_OK.load(Ordering::Relaxed)
+    }
+
+    pub fn hidden() -> bool {
+        IN_TRAY.load(Ordering::Relaxed)
+    }
+
+    pub fn hide(ctx: &egui::Context) {
+        IN_TRAY.store(true, Ordering::Relaxed);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+    }
+
+    pub fn show() {
+        IN_TRAY.store(false, Ordering::Relaxed);
+        if let Some(ctx) = super::CTX.get() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            ctx.request_repaint();
+        }
+    }
+
+    pub fn set_tooltip(text: &str) {
+        TRAY.with(|t| {
+            if let Some(t) = t.borrow().as_ref() {
+                let _ = t.set_tooltip(Some(text));
+            }
+        });
+    }
+
+    /// End the app (the tray icon goes with the process).
+    pub fn quit() -> ! {
+        release_instance();
+        std::process::exit(0)
+    }
+
+    /// macOS: a LaunchAgent; Linux: an XDG autostart entry. Both start `<exe> --tray` at login.
+    fn autostart_file() -> Option<PathBuf> {
+        let base = directories::BaseDirs::new()?;
+        if cfg!(target_os = "macos") {
+            Some(base.home_dir().join("Library/LaunchAgents/net.livereplay.plist"))
+        } else {
+            Some(base.config_dir().join("autostart/livereplay.desktop"))
+        }
+    }
+
+    fn xml(s: &str) -> String {
+        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    }
+
+    pub fn set_autostart(on: bool) -> Result<(), String> {
+        let file = autostart_file().ok_or("no home folder")?;
+        if !on {
+            return match std::fs::remove_file(&file) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+                _ => Ok(()),
+            };
+        }
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let exe = exe.to_string_lossy();
+        let text = if cfg!(target_os = "macos") {
+            format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+                 \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n\
+                 <key>Label</key><string>net.livereplay</string>\n\
+                 <key>ProgramArguments</key><array><string>{}</string><string>--tray</string></array>\n\
+                 <key>RunAtLoad</key><true/>\n</dict></plist>\n",
+                xml(&exe)
+            )
+        } else {
+            format!(
+                "[Desktop Entry]\nType=Application\nName=LiveReplay\nComment=World of Tanks replays, live\n\
+                 Exec=\"{}\" --tray\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
+                exe.replace('\\', "\\\\").replace('"', "\\\"")
+            )
+        };
+        if let Some(dir) = file.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&file, text).map_err(|e| format!("can't create the start-up entry: {e}"))
+    }
+
     pub fn autostart_entry() -> Option<String> {
-        None
+        autostart_file().filter(|p| p.exists()).map(|p| p.display().to_string())
+    }
+
+    fn socket_path() -> Option<PathBuf> {
+        let base = directories::BaseDirs::new();
+        base.as_ref().and_then(|b| b.runtime_dir().map(|d| d.join("livereplay.sock"))).or_else(|| crate::dirs::config_dir().map(|d| d.join("instance.sock")))
+    }
+
+    /// `false` when LiveReplay already runs (it is asked to show its window instead).
+    pub fn first_instance() -> bool {
+        use std::io::Write;
+        use std::os::unix::net::{UnixListener, UnixStream};
+        let Some(path) = socket_path() else { return true };
+        if let Ok(mut s) = UnixStream::connect(&path) {
+            let _ = s.write_all(b"show\n");
+            return false;
+        }
+        let _ = std::fs::remove_file(&path);
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(listener) = UnixListener::bind(&path) {
+            *SOCKET.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
+            std::thread::spawn(move || {
+                for _ in listener.incoming().flatten() {
+                    show();
+                }
+            });
+        }
+        true
+    }
+
+    /// Let a new copy start (restart after an update).
+    pub fn release_instance() {
+        if let Some(p) = SOCKET.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = std::fs::remove_file(p);
+        }
     }
 }
 #[cfg(not(windows))]
-pub use other::*;
+pub use unix::*;
 
 #[cfg(windows)]
 mod win {

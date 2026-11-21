@@ -408,7 +408,11 @@ impl Worker {
         };
         let version = super::library::summarize(path, Some(&engine.game)).map(|e| e.version).unwrap_or_default();
         self.ensure_assets(&engine, &battle.map, &version)?;
-        let damage = super::library::summarize(path, Some(&engine.game)).map(|e| e.damage).unwrap_or(0);
+        // The official result; without one yet (left early, interrupted), the damage the recording
+        // shows, until the results come.
+        let damage = super::library::summarize(path, Some(&engine.game)).map(|e| e.damage).filter(|&d| d > 0).unwrap_or_else(|| {
+            battle.recorder_vehicle.map_or(0, |id| crate::viewer::scene::stats_at(&battle, id, battle.duration).damage_dealt as i64)
+        });
         let flag = if interrupted { "&interrupted=1" } else { "" };
         post_bytes(&self.cfg.upload_key, &format!("/api/battles/{id}/frames?reset=1&finish=1&damage={damage}{flag}"), &wire::encode_frame(&battle, 0.0))?;
         // The original replay file too (kept private on the server, for features that need more of it later).

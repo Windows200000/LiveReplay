@@ -38,6 +38,14 @@ directories = "5"
 ureq = { version = "2", default-features = false, features = ["tls", "json"] }
 getrandom = "0.2"
 
+# Tray icon (close to tray). Linux: StatusNotifier over D-Bus (no GTK needed).
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+raw-window-handle = "0.6"
+[target.'cfg(target_os = "macos")'.dependencies]
+tray-icon = "0.26"
+[target.'cfg(target_os = "linux")'.dependencies]
+tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
+
 # Windows: tray icon (close to tray, start with Windows); the window handle to show/hide it.
 [target.'cfg(windows)'.dependencies]
 tray-icon = "0.26"
