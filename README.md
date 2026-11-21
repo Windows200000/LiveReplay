@@ -111,25 +111,18 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 #### Desktop app
 - [ ] Tray, all platforms (user): the window's X keeps LiveReplay in the tray unless turned off in Settings; left click on
       the tray icon opens the window, right click has only Quit; minimal resources in the tray when no battle is on.
-      Windows: built and tested (0 ms CPU in the tray; second start brings the window back), not committed yet.
-      macOS and Linux: to do
+      Windows: done. macOS and Linux: to do
 - [ ] Start with the computer, into the tray (option, off by default), all platforms. Windows: Startup-folder shortcut
-      (the registry Run entry made Defender flag the exe as `Trojan:Win32/Bearfoos.A!ml`), built, not committed.
-      macOS (LaunchAgent) and Linux (autostart .desktop): to do
+      (done). macOS (LaunchAgent) and Linux (autostart .desktop): to do
 - [ ] Notice about new releases + self-update replacing the exe, both on by default, both switchable in Settings; an
-      update installed while in the tray restarts by itself when no battle or upload is running. Windows: built
-      (download checked against GitHub's size + SHA-256), not yet tested against a real newer release. macOS/Linux: to do
-- [ ] Uploads during the battle: a setting, off by default; off = each battle is uploaded when it is over. Built, not committed
+      update installed while in the tray restarts by itself when no battle or upload is running. Windows: done (tested
+      with a local fake release). macOS/Linux: to do (notice only until then)
 - [ ] Battles that end without results (left early: upload now, re-send when the game's results arrive; game crash or
       disconnect: keep a copy of `temp.wotreplay` and upload it as interrupted) — proposal, waiting for the user's OK
 - [ ] Defender false positive: keep away from malware-like patterns (done: no registry Run entry); a code-signing
       certificate or a false-positive report to Microsoft would settle it for good
 
-#### Viewer
-- [ ] Display settings start collapsed (built, not committed)
-
 #### Web viewer
-- [ ] Link to the latest GitHub release on the website (built, not committed)
 - [ ] 3D data missing on the server: a popup, and the view switches back to 2D. When the data is being uploaded right
       now: show how much of it is there (percent) and switch to 3D when it is complete, unless the user went back to 2D
 - [ ] Identify identical battles (user): the same battle uploaded by several players, or several times by one player,
@@ -147,6 +140,17 @@ Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
 - [ ] Clean up the duplicate test entries on wot.arne.my (admin delete of the player, after the next deploy)
 
 ### Done
+- Windows tray: the window's X keeps LiveReplay in the tray (setting, on by default); left click on the tray icon opens
+  the window, right click has only Quit. In the tray the window is minimised and has no taskbar button, so eframe
+  never spins on a window it can't redraw: 0 ms CPU over 15 s. The tray icon has its own thread. Starting LiveReplay
+  again while it runs brings the running one to the front (one copy only)
+- Windows: start with Windows, into the tray (setting, off by default): a shortcut in the Startup folder. A registry
+  Run entry made Defender flag the exe (`Trojan:Win32/Bearfoos.A!ml`, a machine-learning false positive); the
+  shortcut version scans clean
+- New versions: notice in the app and in the tray tooltip; self-update on Windows (download checked against GitHub's
+  size and SHA-256, exe swapped, old one removed at the next start); both on by default, both in Settings
+- Uploads during the battle: a setting, off by default; off = each battle is uploaded when it is over
+- Display settings start collapsed; the website links to the latest release ("Download the app")
 - Security review of the server (independent review + fixes, each checked by an attack test): nothing uploaded is ever run
   or interpreted. Fixed: header injection through the asset version (could have served a page on the site's origin),
   anyone overwriting shared game data (now only its first uploader; admin reset), unbounded description fields and
