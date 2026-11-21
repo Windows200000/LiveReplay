@@ -459,7 +459,10 @@ impl App {
             ui.add_space(10.0);
             ui.label(RichText::new("App").strong());
             if desktop::tray_supported() {
-                ui.checkbox(&mut draft.autostart, "Start with the computer (in the tray)");
+                let r = ui.checkbox(&mut draft.autostart, "Start with the computer (in the tray)");
+                if cfg!(windows) {
+                    r.on_hover_text("Note: LiveReplay is not code-signed yet, and Windows Defender may take a program that adds itself to the start-up apps for malware and block it");
+                }
                 ui.checkbox(&mut draft.close_to_tray, "Closing the window keeps LiveReplay in the tray")
                     .on_hover_text(desktop::TRAY_HINT);
             }

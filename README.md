@@ -122,7 +122,11 @@ Nothing open.
   file replaced). Wayland can't hide windows: there the X quits. Linux tested for real in WSL (X11): second start
   hands over, close -> hidden, 0 ms CPU in 15 s, start again -> shown, self-update replaced the program. macOS: builds
   and passes its tests in CI; not run on a real Mac
-- Start with the computer (into the tray) on by default (user); existing settings keep their choice
+- Start with the computer on by default (user) was built, then turned back to off: an unsigned program that puts
+  itself into the Startup folder at its first start was quarantined by Windows Defender (`Trojan:Win32/Bearfoos.A!ml`,
+  behaviour-based; the exe itself scans clean). Off by default, the app writes nothing at start and runs fine. Turning
+  the setting on may trigger the same, so the setting says so. The real fix is code signing (e.g. SignPath, free for
+  open-source projects) — the user's decision
 - Uploads without results: until the game's final results arrive, the battle list shows the damage the recording
   saw; then the battle is sent again with the official final stats (user: "ideally still final stats")
 - Battles that end without results: an upload without results is sent again once the game's results show up (checked
