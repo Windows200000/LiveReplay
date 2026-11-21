@@ -335,9 +335,9 @@ impl App {
                 web.insert(format!("/{rel}"), StaticFile { body, gz, br, etag, ctype });
             }
         }
-        let removed = remove_duplicates(&data, &mut st);
+        let removed = remove_duplicates(&data, &mut st) + merge_same_battles(&data, &mut st);
         if removed > 0 {
-            println!("removed {removed} duplicate live uploads");
+            println!("removed {removed} duplicate uploads");
         }
         // Expired viewing codes are deleted.
         let t = now();
@@ -456,6 +456,57 @@ fn is_live(s: &Stored, t: u64) -> bool {
     s.info.live && t.saturating_sub(s.info.updated) < STALE_SECS
 }
 
+/// The uploader `owner` may act on this upload: it sent it, or it owns the player name it was
+/// uploaded for (an older key of the same player, e.g. after a reinstall).
+fn owns(st: &State, owner: &str, s: &Stored) -> bool {
+    s.owner == owner || st.claims.get(&claim_key(&s.info.realm, &s.info.player)).is_some_and(|k| k == owner)
+}
+
+/// The same battle uploaded more than once for the same player (also by different keys): same
+/// game battle id, or the same replay file. The most complete copy stays, owned by whoever owns the
+/// player name now.
+fn merge_same_battles(data: &Path, st: &mut State) -> usize {
+    let key = |s: &Stored| -> Option<String> {
+        let who = format!("{}:{}", s.info.realm.to_ascii_uppercase(), s.info.player.to_lowercase());
+        if s.arena_id != 0 {
+            Some(format!("{who}#a{}", s.arena_id))
+        } else if !s.info.file_name.is_empty() {
+            Some(format!("{who}#f{}", s.info.file_name))
+        } else {
+            None
+        }
+    };
+    let mut groups: HashMap<String, Vec<String>> = HashMap::new();
+    for s in st.battles.values() {
+        if let Some(k) = key(s) {
+            groups.entry(k).or_default().push(s.info.id.clone());
+        }
+    }
+    let mut removed = 0;
+    for ids in groups.into_values().filter(|v| v.len() > 1) {
+        let keep = ids.iter().max_by_key(|id| {
+            let s = &st.battles[*id];
+            (s.info.replay_size > 0, !s.info.live, s.info.size, s.info.updated)
+        });
+        let keep = keep.cloned().unwrap_or_default();
+        for id in ids.iter().filter(|id| **id != keep) {
+            for ext in ["bin", "json", "wotreplay"] {
+                let _ = std::fs::remove_file(data.join("battles").join(format!("{id}.{ext}")));
+            }
+            st.battles.remove(id);
+            removed += 1;
+        }
+        let owner = st.battles.get(&keep).and_then(|s| st.claims.get(&claim_key(&s.info.realm, &s.info.player)).cloned());
+        if let (Some(owner), Some(s)) = (owner, st.battles.get_mut(&keep)) {
+            if s.owner != owner {
+                s.owner = owner;
+                write_json(&data.join("battles").join(format!("{keep}.json")), &*s);
+            }
+        }
+    }
+    removed
+}
+
 /// A battle as shown: a live upload that stopped without being finished is interrupted.
 fn shown(s: &Stored, t: u64) -> BattleInfo {
     let mut i = s.info.clone();
@@ -533,7 +584,7 @@ fn route(app: &App, rq: &mut Request) -> Reply {
             let Some(owner) = key_hash(rq) else { return Reply::err(401, "key required") };
             let mut st = app.st();
             match st.battles.get(*id) {
-                Some(s) if s.owner == owner => {
+                Some(s) if owns(&st, &owner, s) => {
                     app.remove_battle(&mut st, id);
                     Reply::json(&())
                 }
@@ -545,7 +596,8 @@ fn route(app: &App, rq: &mut Request) -> Reply {
             let Some(owner) = key_hash(rq) else { return Reply::err(401, "key required") };
             let st = app.st();
             let t = now();
-            let mut battles: Vec<BattleInfo> = st.battles.values().filter(|s| s.owner == owner).map(|s| s.info.clone()).collect();
+            // Also uploads of this player's names by an older key (same player, new install).
+            let mut battles: Vec<BattleInfo> = st.battles.values().filter(|s| owns(&st, &owner, s)).map(|s| s.info.clone()).collect();
             battles.sort_by(|a, b| b.updated.cmp(&a.updated));
             Reply::json(&MyData {
                 player_names: st.claims.iter().filter(|(_, k)| **k == owner).map(|(n, _)| n.clone()).collect(),
@@ -556,7 +608,8 @@ fn route(app: &App, rq: &mut Request) -> Reply {
         (Method::Delete, ["api", "me"]) => {
             let Some(owner) = key_hash(rq) else { return Reply::err(401, "key required") };
             let mut st = app.st();
-            let ids: Vec<String> = st.battles.values().filter(|s| s.owner == owner).map(|s| s.info.id.clone()).collect();
+            // Everything uploaded for this player's names, whatever key sent it (every viewpoint).
+            let ids: Vec<String> = st.battles.values().filter(|s| owns(&st, &owner, s)).map(|s| s.info.id.clone()).collect();
             for id in &ids {
                 app.remove_battle(&mut st, id);
             }
@@ -835,38 +888,49 @@ fn new_battle(app: &App, rq: &mut Request) -> Reply {
             write_json(&app.data.join("claims.json"), &st.claims);
         }
     }
-    // This uploader's same battle again (the app restarted, or the finished replay of its live
-    // upload): that entry, never a second one.
-    if nb.arena_id != 0 {
-        let same = st.battles.values().find(|s| s.owner == owner && s.arena_id == nb.arena_id && s.info.player == nb.player).map(|s| s.info.id.clone());
-        if let Some(id) = same {
-            let s = st.battles.get_mut(&id).unwrap();
-            if !nb.live && !nb.file_name.is_empty() && s.info.file_name.is_empty() {
-                s.info.file_name = nb.file_name.clone();
-                let s = s.clone();
-                app.save_battle(&s);
-            }
-            return Reply::json(&st.battles[&id].info);
+    // The same battle again for this player (app restart, a manual upload, the finished replay of
+    // a live upload, or an older key of the same player): that entry, never a second one. This key
+    // owns the player name (checked above), so it takes the entry over.
+    let same_player = |s: &Stored| s.info.player.eq_ignore_ascii_case(&nb.player) && s.info.realm.eq_ignore_ascii_case(&nb.realm);
+    let same = st
+        .battles
+        .values()
+        .filter(|s| same_player(s))
+        .find(|s| (nb.arena_id != 0 && s.arena_id == nb.arena_id) || (!nb.file_name.is_empty() && s.info.file_name == nb.file_name))
+        .map(|s| s.info.id.clone());
+    if let Some(id) = same {
+        let s = st.battles.get_mut(&id).unwrap();
+        let mut changed = s.owner != owner;
+        s.owner = owner.clone();
+        if !nb.live && !nb.file_name.is_empty() && s.info.file_name.is_empty() {
+            s.info.file_name = nb.file_name.clone();
+            changed = true;
         }
+        if s.arena_id == 0 && nb.arena_id != 0 {
+            s.arena_id = nb.arena_id;
+            changed = true;
+        }
+        let s = s.clone();
+        if changed {
+            app.save_battle(&s);
+        }
+        return Reply::json(&s.info);
     }
-    // A finished replay uploaded again: same battle entry.
     if !nb.live && !nb.file_name.is_empty() {
-        if let Some(s) = st.battles.values().find(|s| s.owner == owner && s.info.file_name == nb.file_name && s.info.player == nb.player) {
-            return Reply::json(&s.info);
-        }
         // The finished replay of this uploader's live upload (live entries have no file name; their
         // date is when the game started writing, a few minutes before the replay's own): that entry.
         let at = date_secs(&nb.date);
         let live = st
             .battles
             .values()
-            .filter(|s| s.owner == owner && s.info.file_name.is_empty() && s.info.player == nb.player && s.info.map == nb.map)
+            .filter(|s| same_player(s) && s.info.file_name.is_empty() && s.info.map == nb.map)
             .filter_map(|s| Some((s.info.id.clone(), (date_secs(&s.info.date)? - at?).abs())))
             .filter(|(_, d)| *d <= 600)
             .min_by_key(|(_, d)| *d)
             .map(|(id, _)| id);
         if let Some(id) = live {
             let s = st.battles.get_mut(&id).unwrap();
+            s.owner = owner.clone();
             s.info.file_name = nb.file_name.clone();
             let s = s.clone();
             app.save_battle(&s);
@@ -1173,6 +1237,36 @@ mod tests {
     fn stored(id: &str, owner: &str, map: &str, tanks: &[i32], size: u64, created: u64) -> Stored {
         let info = BattleInfo { id: id.into(), player: "p".into(), map: map.into(), size, live: true, ..Default::default() };
         Stored { info, owner: owner.into(), created, vehicle_ids: tanks.to_vec(), players: vec![], arena_id: 0 }
+    }
+
+    #[test]
+    fn same_battle_from_two_keys() {
+        let dir = std::env::temp_dir().join(format!("lr-merge-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("battles")).unwrap();
+        let mut st = State::default();
+        st.claims.insert(claim_key("EU", "p"), "new".into());
+        let mut a = stored("a", "old", "m", &[], 500, 1);
+        a.info.file_name = "x.wotreplay".into();
+        a.info.realm = "EU".into();
+        a.info.live = false;
+        let mut b = stored("b", "new", "m", &[], 400, 2);
+        b.info.file_name = "x.wotreplay".into();
+        b.info.realm = "EU".into();
+        b.info.live = false;
+        b.info.replay_size = 900;
+        let mut c = stored("c", "old", "m", &[], 300, 3);
+        c.info.file_name = "other.wotreplay".into();
+        c.info.realm = "EU".into();
+        for s in [a, b, c] {
+            st.battles.insert(s.info.id.clone(), s);
+        }
+        // a and b are one battle: b (with the original replay) stays; c is another battle.
+        assert_eq!(merge_same_battles(&dir, &mut st), 1);
+        assert!(st.battles.contains_key("b") && st.battles.contains_key("c") && !st.battles.contains_key("a"));
+        // The current owner of the name may act on the old key's upload too.
+        assert!(owns(&st, "new", &st.battles["c"]));
+        assert!(!owns(&st, "someone", &st.battles["c"]));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

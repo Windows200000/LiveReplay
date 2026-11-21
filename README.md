@@ -111,6 +111,13 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 Nothing open.
 
 ### Done
+- No duplicates on manual upload (user): the same battle for the same player (same game battle id, or the same replay
+  file) is one entry whatever uploader key sends it; the key that owns the player name takes the entry over (the
+  duplicate found on wot.arne.my was one replay file uploaded by an old and a new key). Existing duplicates are merged
+  when the server starts, keeping the most complete copy
+- Deleting your own data removes every upload / viewpoint of your player names, also those sent by an older key of
+  yours (user: "even if the ID changes"); "Download my server data" and deleting single battles cover them too.
+  Tested on a local server: old key + new key, merge at start, manual upload reuses the entry, delete removes it
 - A live battle no longer stays "live" on the website after it ended in the game (user): the app ends the live entry as
   soon as the game's temp file empties (back in the garage), measured 4 s; before, only the full final upload (or the
   server's 90 s timeout) ended it. If a recording ever contains the after-battle period, that ends it too (recordings
