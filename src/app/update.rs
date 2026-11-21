@@ -338,7 +338,9 @@ mod tests {
         std::fs::write(&exe, b"old").unwrap();
         replace_exe(&exe, b"new").unwrap();
         assert_eq!(std::fs::read(&exe).unwrap(), b"new");
-        assert_eq!(std::fs::read(old_path(&exe)).unwrap(), b"old");
+        // Windows keeps the running exe as .old (removed at the next start); elsewhere it is
+        // replaced directly.
+        assert_eq!(std::fs::read(old_path(&exe)).ok().as_deref(), if cfg!(windows) { Some(&b"old"[..]) } else { None });
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
