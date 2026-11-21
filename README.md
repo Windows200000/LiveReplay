@@ -111,6 +111,10 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 Nothing open.
 
 ### Done
+- A live battle no longer stays "live" on the website after it ended in the game (user): the app ends the live entry as
+  soon as the game's temp file empties (back in the garage), measured 4 s; before, only the full final upload (or the
+  server's 90 s timeout) ended it. If a recording ever contains the after-battle period, that ends it too (recordings
+  checked so far stop just before it). The full upload with results follows as before
 - Settings save themselves, always (user): every change takes effect and is saved at once; folder fields when they are
   left (not a rescan per key press), also when the window is closed while typing. No Save button
 - Builds outside Docker (user's server): `web/build.sh` fetches the right tools itself on Linux, once, into

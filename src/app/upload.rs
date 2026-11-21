@@ -252,6 +252,8 @@ struct LiveUpload {
     changed: Instant,
     /// Already uploaded as interrupted (it stopped growing).
     interrupted: bool,
+    /// The battle is over and the server was told (no longer live there).
+    finished: bool,
 }
 
 struct Worker {
@@ -517,7 +519,7 @@ impl Worker {
                 let key = (battle.map.clone(), battle.recorder_vehicle.unwrap_or(0));
                 if self.current.as_ref().map_or(true, |c| c.key != key || len < c.last_len) {
                     self.finish_previous();
-                    self.current = Some(LiveUpload { id: None, key, sent_until: 0.0, last_len: 0, started: SystemTime::now(), ended: None, changed: Instant::now(), interrupted: false });
+                    self.current = Some(LiveUpload { id: None, key, sent_until: 0.0, last_len: 0, started: SystemTime::now(), ended: None, changed: Instant::now(), interrupted: false, finished: false });
                     set_marker(SystemTime::now());
                 }
                 if self.current.as_ref().unwrap().id.is_none() {
@@ -546,11 +548,21 @@ impl Worker {
                     }
                 }
                 let c = self.current.as_mut().unwrap();
+                if c.finished {
+                    // Over: the full replay follows when the game writes it.
+                    c.last_len = len;
+                    c.changed = Instant::now();
+                    return Ok(());
+                }
                 let from = if c.sent_until > 0.0 { (c.sent_until - LIVE_OVERLAP).max(0.001) } else { 0.0 };
                 let id = c.id.clone().unwrap();
                 // The first upload (also after an app restart, onto the same entry) replaces its data.
                 let reset = if from == 0.0 { "?reset=1" } else { "" };
-                post_bytes(&self.cfg.upload_key, &format!("/api/battles/{id}/frames{reset}"), &wire::encode_frame(&battle, from))?;
+                // The battle is over in the recording: no longer live on the website, right away.
+                let over = battle.periods.iter().any(|p| p.1 == crate::replay::battle::Period::AfterBattle);
+                let finish = if !over { "" } else if reset.is_empty() { "?finish=1" } else { "&finish=1" };
+                post_bytes(&self.cfg.upload_key, &format!("/api/battles/{id}/frames{reset}{finish}"), &wire::encode_frame(&battle, from))?;
+                c.finished = over;
                 c.sent_until = battle.duration;
                 c.last_len = len;
                 c.changed = Instant::now();
@@ -560,6 +572,11 @@ impl Worker {
             None => {
                 let Some(c) = self.current.as_mut() else { return Ok(()) };
                 let ended = *c.ended.get_or_insert_with(Instant::now);
+                // The game is back in the garage: the battle is not live any more.
+                if let (false, Some(id)) = (c.finished, c.id.clone()) {
+                    c.finished = true;
+                    let _ = post_bytes(&self.cfg.upload_key, &format!("/api/battles/{id}/frames?finish=1"), &[]);
+                }
                 // The game writes the replay under its final name when the battle is left.
                 let started = c.started;
                 let newest = std::fs::read_dir(&dir)
