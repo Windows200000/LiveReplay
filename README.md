@@ -111,6 +111,10 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 Nothing open.
 
 ### Done
+- Builds outside Docker (user's server): `web/build.sh` fetches the right tools itself on Linux, once, into
+  `target/tools`: the prebuilt wasm-bindgen matching Cargo.lock (no `cargo install wasm-bindgen-cli`, so no buf_redux /
+  multipart warning) and binaryen 125 checked against pinned checksums (the distro's wasm-opt 108 was too old, so the
+  viewer was not optimised). The Dockerfile uses the same script; the image's default is 16 server threads
 - macOS and Linux (user: "do it for all platforms"): tray (macOS menu bar; Linux StatusNotifier via D-Bus, no GTK
   needed): the window's X keeps LiveReplay running, left click on the icon opens the window, its menu has only Quit;
   start with the computer into the tray (macOS LaunchAgent, Linux XDG autostart); one running copy (a second start
