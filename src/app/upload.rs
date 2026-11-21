@@ -359,6 +359,8 @@ impl Worker {
         for pf in prefabs {
             wanted.push((wp::prefab_asset(pf), Box::new(move || cache.prefab(gd, pf).map(|m| wp::mesh_pack(&m)))));
         }
+        // What the server lacks; announced first, so web viewers waiting for it show progress.
+        let mut todo = Vec::new();
         for (name, make) in wanted {
             if self.checked.contains(&name) {
                 continue;
@@ -369,7 +371,19 @@ impl Worker {
                 Err(ureq::Error::Status(404, _)) => None,
                 Err(e) => return Err(err(e)),
             };
-            if have.as_deref() != Some(version) {
+            if have.as_deref() == Some(version) {
+                self.checked.insert(name);
+            } else {
+                todo.push((name, make));
+            }
+        }
+        if !todo.is_empty() {
+            let names: Vec<&String> = todo.iter().map(|(n, _)| n).collect();
+            let _ = agent().post(&format!("{}/api/asset-expect", server_url())).set(api::KEY_HEADER, &self.cfg.upload_key).send_json(&names);
+        }
+        for (name, make) in todo {
+            let url = format!("{}/api/assets/{name}", server_url());
+            {
                 if let Some(body) = make() {
                     match agent().put(&url).query("version", version).set(api::KEY_HEADER, &self.cfg.upload_key).send_bytes(&body) {
                         // Another uploader maintains this asset: theirs stays.

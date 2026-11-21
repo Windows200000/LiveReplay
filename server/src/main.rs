@@ -187,6 +187,46 @@ struct State {
     codes: HashMap<String, Code>,
     battles: HashMap<String, Stored>,
     assets: HashMap<String, AssetMeta>,
+    /// Asset uploads in progress: name -> (bytes received, bytes in total). Memory only.
+    uploading: HashMap<String, (u64, u64)>,
+    /// Assets an app announced it is about to upload: name -> until (Unix seconds). Memory only.
+    expected: HashMap<String, u64>,
+}
+
+/// Removes an asset from "uploading" however the upload ends.
+struct Uploading<'a>(&'a App, String);
+
+impl Drop for Uploading<'_> {
+    fn drop(&mut self) {
+        self.0.st().uploading.remove(&self.1);
+    }
+}
+
+/// Read an asset upload, keeping its progress visible to `/api/asset-status`.
+fn read_asset(app: &App, rq: &mut Request, name: &str) -> Result<Vec<u8>, Reply> {
+    let total = rq.body_length().unwrap_or(0) as u64;
+    if total > MAX_ASSET as u64 {
+        return Err(Reply::err(413, "too large"));
+    }
+    app.st().uploading.insert(name.to_string(), (0, total));
+    let _guard = Uploading(app, name.to_string());
+    let mut body = Vec::with_capacity(total as usize);
+    let mut buf = vec![0u8; 256 << 10];
+    let reader = rq.as_reader();
+    loop {
+        let n = reader.read(&mut buf).map_err(|_| Reply::err(400, "bad body"))?;
+        if n == 0 {
+            break;
+        }
+        body.extend_from_slice(&buf[..n]);
+        if body.len() > MAX_ASSET {
+            return Err(Reply::err(413, "too large"));
+        }
+        if let Some(u) = app.st().uploading.get_mut(name) {
+            u.0 = body.len() as u64;
+        }
+    }
+    Ok(body)
 }
 
 struct StaticFile {
@@ -628,8 +668,11 @@ fn route(app: &App, rq: &mut Request) -> Reply {
         (Method::Put, ["api", "assets", name]) if valid_asset_name(name) => {
             let Some(owner) = key_hash(rq) else { return Reply::err(401, "key required") };
             let version = asset_version(&query(q, "version").unwrap_or_default());
+            if app.st().assets.get(*name).is_some_and(|m| !m.owner.is_empty() && m.owner != owner) {
+                return Reply::err(403, "this asset is kept up to date by another uploader");
+            }
             // Map 3D packs can be large (big Steel Hunter maps ~30 MB).
-            let body = match read_body_max(rq, MAX_ASSET) {
+            let body = match read_asset(app, rq, name) {
                 Ok(b) => b,
                 Err(e) => return e,
             };
@@ -654,7 +697,47 @@ fn route(app: &App, rq: &mut Request) -> Reply {
             let meta = AssetMeta { version, size: body.len() as u64, owner };
             write_json(&dir.join(format!("{name}.json")), &meta);
             st.assets.insert(name.to_string(), meta);
+            st.expected.remove(*name);
             Reply::json(&())
+        }
+        (Method::Post, ["api", "asset-expect"]) => {
+            if key_hash(rq).is_none() {
+                return Reply::err(401, "key required");
+            }
+            let Ok(body) = read_body(rq) else { return Reply::err(400, "bad body") };
+            let Ok(names) = serde_json::from_slice::<Vec<String>>(&body) else { return Reply::err(400, "bad json") };
+            let t = now();
+            let mut st = app.st();
+            st.expected.retain(|_, until| *until > t);
+            for n in names.iter().filter(|n| valid_asset_name(n)).take(300) {
+                if st.expected.len() < MAX_ASSETS && !st.assets.contains_key(n) {
+                    st.expected.insert(n.clone(), t + 600);
+                }
+            }
+            Reply::json(&())
+        }
+        (Method::Get, ["api", "asset-status"]) => {
+            let t = now();
+            let st = app.st();
+            let names = query(q, "names").unwrap_or_default();
+            let out: HashMap<String, AssetStatus> = names
+                .split(',')
+                .filter(|n| valid_asset_name(n))
+                .take(300)
+                .map(|n| {
+                    let s = if let Some(m) = st.assets.get(n) {
+                        AssetStatus { state: "ready".into(), size: m.size, ..Default::default() }
+                    } else if let Some(&(received, total)) = st.uploading.get(n) {
+                        AssetStatus { state: "uploading".into(), received, total, ..Default::default() }
+                    } else if st.expected.get(n).is_some_and(|until| *until > t) {
+                        AssetStatus { state: "expected".into(), ..Default::default() }
+                    } else {
+                        AssetStatus { state: "missing".into(), ..Default::default() }
+                    };
+                    (n.to_string(), s)
+                })
+                .collect();
+            Reply::json(&out)
         }
         (Method::Get | Method::Head, _) if !path.starts_with("/api/") => static_file(app, rq, path),
         _ => Reply::err(404, "not found"),

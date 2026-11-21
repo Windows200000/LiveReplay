@@ -12,10 +12,21 @@ use super::settings::{HpText, ViewerSettings};
 use super::view3d::{Scene3D, View3D};
 use crate::replay::battle::{Battle, Period};
 
+/// How loading the 3D view goes (sent by `Assets::request_3d`, any number of `Progress` first).
+pub enum Load3D {
+    Ready(Scene3D),
+    /// Still coming (e.g. another player's app is uploading it right now): shown as status.
+    Progress(String),
+    /// Not available: the viewer says so in a popup and goes back to 2D.
+    Missing(String),
+    Failed(String),
+}
+
 /// Source of the 3D data for a battle. `request_3d` must deliver its result on `tx`
-/// (from a thread on the desktop, from an async fetch on the web).
+/// (from a thread on the desktop, from an async fetch on the web). When the receiver is gone
+/// (the user went back to 2D), it can stop.
 pub trait Assets: Send + Sync {
-    fn request_3d(&self, req: Request3D, tx: mpsc::Sender<Result<Scene3D, String>>);
+    fn request_3d(&self, req: Request3D, tx: mpsc::Sender<Load3D>);
     /// A stat icon image (from the game client), if available.
     fn icon(&self, _icon: super::theme::Icon) -> Option<crate::gamedata::dds::Image> {
         None
@@ -40,13 +51,15 @@ pub struct Loaded {
     view: Box<dyn BattleView + Send>,
     /// 3D view: only exists while the 3D toggle is on.
     view3d: Option<Box<dyn BattleView + Send>>,
-    rx3d: Option<mpsc::Receiver<Result<Scene3D, String>>>,
+    rx3d: Option<mpsc::Receiver<Load3D>>,
     status3d: Option<String>,
+    /// Latest progress text while the 3D data is still coming.
+    progress3d: Option<String>,
 }
 
 impl Loaded {
     pub fn new(battle: Battle, view: Box<dyn BattleView + Send>) -> Self {
-        Self { battle, view, view3d: None, rx3d: None, status3d: None }
+        Self { battle, view, view3d: None, rx3d: None, status3d: None, progress3d: None }
     }
 }
 
@@ -66,6 +79,8 @@ pub enum Msg {
 
 pub struct ReplayViewer {
     pub title: String,
+    /// "No 3D data" popup (the view went back to 2D).
+    notice3d: Option<String>,
     rx: mpsc::Receiver<Msg>,
     /// Dropping this tells a live watcher to stop.
     _alive: Arc<()>,
@@ -487,10 +502,13 @@ pub mod native {
             crate::gamedata::models::png_image(&self.0.game.gui_file(&super::super::theme::crit_icon_path(kind, state))?)
         }
 
-        fn request_3d(&self, req: Request3D, tx: mpsc::Sender<Result<Scene3D, String>>) {
+        fn request_3d(&self, req: Request3D, tx: mpsc::Sender<Load3D>) {
             let engine = self.0.clone();
             std::thread::spawn(move || {
-                let _ = tx.send(engine.scene3d(&req));
+                let _ = tx.send(match engine.scene3d(&req) {
+                    Ok(s) => Load3D::Ready(s),
+                    Err(e) => Load3D::Failed(e),
+                });
             });
         }
     }
@@ -640,6 +658,7 @@ impl ReplayViewer {
             share_menu: None,
             pin: None,
             follow_at_start: None,
+            notice3d: None,
             icons: Default::default(),
             crit_tex: Vec::new(),
             crit_ids: Default::default(),
@@ -707,6 +726,22 @@ impl ReplayViewer {
     }
 
     pub fn ui(&mut self, ctx: &egui::Context) {
+        if let Some(text) = self.notice3d.clone() {
+            let mut close = false;
+            egui::Window::new("No 3D view for this map yet")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.set_max_width(360.0);
+                    ui.label(text);
+                    ui.add_space(6.0);
+                    close = ui.button("OK").clicked();
+                });
+            if close {
+                self.notice3d = None;
+            }
+        }
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Msg::Loaded(loaded, assets) => {
@@ -1006,11 +1041,20 @@ impl ReplayViewer {
         // Each view filters shots by its own setting.
         let shots = scene::shots_at(battle, t);
         // 3D lifecycle: built in the background on first use, dropped entirely when switched off.
+        let mut no_3d = None;
         if self.settings.view_3d {
-            if let Some(rx) = &loaded.rx3d {
-                if let Ok(r) = rx.try_recv() {
-                    match r {
-                        Ok(scene) => {
+            while let Some(r) = loaded.rx3d.as_ref().and_then(|rx| rx.try_recv().ok()) {
+                match r {
+                    Load3D::Progress(text) => loaded.progress3d = Some(text),
+                    Load3D::Missing(text) => {
+                        no_3d = Some(text);
+                        loaded.rx3d = None;
+                    }
+                    Load3D::Failed(e) => {
+                        loaded.status3d = Some(e);
+                        loaded.rx3d = None;
+                    }
+                    Load3D::Ready(scene) => {
                             let mut v = View3D::new(scene);
                             if let Some([x, z]) = self.look_at {
                                 v.set_target(x, z);
@@ -1022,13 +1066,11 @@ impl ReplayViewer {
                                 v.set_follow(Some(id));
                             }
                             loaded.view3d = Some(Box::new(v));
-                        }
-                        Err(e) => loaded.status3d = Some(e),
+                            loaded.rx3d = None;
                     }
-                    loaded.rx3d = None;
                 }
             }
-            if loaded.view3d.is_none() && loaded.rx3d.is_none() && loaded.status3d.is_none() {
+            if loaded.view3d.is_none() && loaded.rx3d.is_none() && loaded.status3d.is_none() && no_3d.is_none() {
                 if let Some(assets) = self.assets.clone() {
                     let (tx, rx) = mpsc::channel();
                     let mut types: Vec<String> = loaded.battle.vehicles.values().map(|v| v.vehicle_type.clone()).collect();
@@ -1051,6 +1093,12 @@ impl ReplayViewer {
             loaded.view3d = None;
             loaded.rx3d = None;
             loaded.status3d = None;
+            loaded.progress3d = None;
+        }
+        if let Some(text) = no_3d {
+            // Back to 2D, and say why.
+            self.settings.view_3d = false;
+            self.notice3d = Some(text);
         }
         let battle = &loaded.battle;
 
@@ -1087,7 +1135,7 @@ impl ReplayViewer {
         let mut out_mini = None;
         let show_3d = self.settings.view_3d && loaded.view3d.is_some();
         let status_3d = if self.settings.view_3d && !show_3d {
-            Some(loaded.status3d.clone().unwrap_or_else(|| "Preparing 3D view (first time per map/tank takes a moment)...".into()))
+            Some(loaded.status3d.clone().or_else(|| loaded.progress3d.clone()).unwrap_or_else(|| "Preparing 3D view (first time per map/tank takes a moment)...".into()))
         } else {
             None
         };

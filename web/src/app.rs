@@ -10,7 +10,7 @@ use livereplay::net::{decode_pack, IconPack, MapPack};
 use livereplay::replay::battle::Battle;
 use livereplay::replay::wire;
 use livereplay::viewer::minimap2d::Minimap2D;
-use livereplay::viewer::player::{Assets, Loaded, Msg, ReplayViewer, Request3D};
+use livereplay::viewer::player::{Assets, Load3D, Loaded, Msg, ReplayViewer, Request3D};
 use livereplay::viewer::view3d::Scene3D;
 use livereplay_api::*;
 
@@ -59,35 +59,106 @@ struct WebAssets {
 }
 
 impl Assets for WebAssets {
-    /// 3D packs from the server (uploaded by players' desktop apps after their battles).
-    fn request_3d(&self, req: Request3D, tx: Sender<Result<Scene3D, String>>) {
+    /// 3D packs from the server (uploaded by players' desktop apps after their battles). If some
+    /// are being uploaded right now (or an app announced them), waits and reports the progress;
+    /// if the map's own data is simply not there, says so (the viewer goes back to 2D). Stops
+    /// when the viewer no longer waits (the user went back to 2D).
+    fn request_3d(&self, req: Request3D, tx: Sender<Load3D>) {
         use livereplay::gamedata::webpack as wp;
         let (map, ctx) = (self.map.clone(), self.ctx.clone());
         wasm_bindgen_futures::spawn_local(async move {
-            async fn get(name: String) -> Option<Vec<u8>> {
+            async fn get(name: &str) -> Option<Vec<u8>> {
                 fetch::get_async(&format!("/api/assets/{name}"), "").await.ok().filter(|r| r.ok()).map(|r| r.body)
             }
-            let missing = "3D data for this map isn't on the server yet: it is added when someone uploads a battle on it with the LiveReplay app";
-            let terrain = get(wp::terrain_asset(&req.map)).await.and_then(|b| wp::decode_terrain_pack(&b));
-            let scene = get(wp::scene_asset(&req.map, req.gameplay_id)).await.and_then(|b| wp::decode_scene_pack(&b));
+            async fn sleep(ms: i32) {
+                let p = js_sys::Promise::new(&mut |resolve, _| {
+                    if let Some(w) = web_sys::window() {
+                        let _ = w.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms);
+                    }
+                });
+                let _ = wasm_bindgen_futures::JsFuture::from(p).await;
+            }
+            let (terrain_name, scene_name) = (wp::terrain_asset(&req.map), wp::scene_asset(&req.map, req.gameplay_id));
+            let mut names = vec![terrain_name.clone(), scene_name.clone()];
+            names.extend(req.vehicle_types.iter().map(|vt| wp::tank_asset(vt)));
+            names.extend(req.prefabs.iter().map(|pf| wp::prefab_asset(pf)));
+            let mut got: HashMap<String, Vec<u8>> = HashMap::new();
+            loop {
+                // The map's own data first; tanks and objects only once it is there.
+                for n in &names[..2] {
+                    if !got.contains_key(n) {
+                        if let Some(b) = get(n).await {
+                            got.insert(n.clone(), b);
+                        }
+                    }
+                }
+                let map_there = got.contains_key(&terrain_name) && got.contains_key(&scene_name);
+                for n in names[2..].iter().filter(|_| map_there) {
+                    if !got.contains_key(n) {
+                        if let Some(b) = get(n).await {
+                            got.insert(n.clone(), b);
+                        }
+                    }
+                }
+                let wanted = if map_there { &names[..] } else { &names[..2] };
+                let missing: Vec<&String> = wanted.iter().filter(|n| !got.contains_key(*n)).collect();
+                if missing.is_empty() && map_there {
+                    break;
+                }
+                let list = missing.iter().map(|n| n.as_str()).collect::<Vec<_>>().join(",");
+                let status: HashMap<String, AssetStatus> = fetch::get_async(&format!("/api/asset-status?names={list}"), "")
+                    .await
+                    .ok()
+                    .filter(|r| r.ok())
+                    .and_then(|r| serde_json::from_slice(&r.body).ok())
+                    .unwrap_or_default();
+                let coming: Vec<&AssetStatus> = missing.iter().filter_map(|n| status.get(*n)).filter(|s| s.state == "uploading" || s.state == "expected").collect();
+                if coming.is_empty() {
+                    if !got.contains_key(&terrain_name) || !got.contains_key(&scene_name) {
+                        let _ = tx.send(Load3D::Missing(
+                            "There is no 3D data for this map on the server yet. It is added when someone with the LiveReplay app \
+                             uploads a battle on this map. Showing the map in 2D."
+                                .into(),
+                        ));
+                        ctx.request_repaint();
+                        return;
+                    }
+                    // Only some tanks or map-event objects are missing and nobody is sending them.
+                    break;
+                }
+                let have: u64 = got.values().map(|b| b.len() as u64).sum();
+                let (received, total) = coming.iter().fold((0, 0), |(r, t), s| (r + s.received, t + s.total));
+                let text = if received == 0 && coming.iter().all(|s| s.state == "expected") {
+                    "The 3D data for this map is about to be uploaded by a player's LiveReplay app. Waiting...".to_string()
+                } else {
+                    format!("The 3D data for this map is being uploaded right now: {}%", (have + received) * 100 / (have + total).max(1))
+                };
+                if tx.send(Load3D::Progress(text)).is_err() {
+                    return;
+                }
+                ctx.request_repaint();
+                sleep(2000).await;
+            }
+            let terrain = got.get(&terrain_name).and_then(|b| wp::decode_terrain_pack(b));
+            let scene = got.get(&scene_name).and_then(|b| wp::decode_scene_pack(b));
             let (Some(terrain), Some(scene)) = (terrain, scene) else {
-                let _ = tx.send(Err(missing.into()));
+                let _ = tx.send(Load3D::Failed("The 3D data for this map on the server is unreadable".into()));
                 ctx.request_repaint();
                 return;
             };
             let mut tanks = HashMap::new();
             for vt in &req.vehicle_types {
-                if let Some(t) = get(wp::tank_asset(vt)).await.and_then(|b| wp::decode_tank_pack(&b)) {
+                if let Some(t) = got.get(&wp::tank_asset(vt)).and_then(|b| wp::decode_tank_pack(b)) {
                     tanks.insert(vt.clone(), t);
                 }
             }
             let mut prefabs = HashMap::new();
             for pf in &req.prefabs {
-                if let Some(m) = get(wp::prefab_asset(pf)).await.and_then(|b| wp::decode_mesh_pack(&b)) {
+                if let Some(m) = got.get(&wp::prefab_asset(pf)).and_then(|b| wp::decode_mesh_pack(b)) {
                     prefabs.insert(pf.clone(), m);
                 }
             }
-            let _ = tx.send(Ok(Scene3D { arena: map.0.clone(), terrain, minimap: map.1.clone(), map: scene, tanks, prefabs }));
+            let _ = tx.send(Load3D::Ready(Scene3D { arena: map.0.clone(), terrain, minimap: map.1.clone(), map: scene, tanks, prefabs }));
             ctx.request_repaint();
         });
     }

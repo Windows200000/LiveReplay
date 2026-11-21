@@ -18,6 +18,8 @@
 //!   others; `GET` with the owner's key downloads it)
 //! - `GET /api/me` K -> [`MyData`];  `DELETE /api/me` K: delete everything of this uploader;
 //!   `DELETE /api/battles/{id}` K: delete one battle (GDPR access / erasure)
+//! - `POST /api/asset-expect` K, body: JSON list of asset names about to be uploaded (shown as
+//!   "expected" for 10 minutes); `GET /api/asset-status?names=a,b` -> name -> [`AssetStatus`]
 //! - `DELETE /api/admin/assets` with [`ADMIN_HEADER`]: remove all shared game data (clients upload it again)
 //! - `DELETE /api/admin/players/{name}` with [`ADMIN_HEADER`]: remove every battle a player is in
 //!   and free the name for the next uploader
@@ -36,6 +38,18 @@ pub const CODES_HEADER: &str = "X-Livereplay-Codes";
 pub const GEN_HEADER: &str = "X-Livereplay-Gen";
 /// Version of an asset (client version it came from).
 pub const VERSION_HEADER: &str = "X-Livereplay-Version";
+
+/// Where a shared asset stands (`GET /api/asset-status?names=a,b`): "ready" (with `size`),
+/// "uploading" (`received` of `total` bytes so far), "expected" (an app announced it is about to
+/// upload it) or "missing".
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AssetStatus {
+    pub state: String,
+    pub size: u64,
+    pub received: u64,
+    pub total: u64,
+}
 
 /// An asset version as the server keeps it: the client's version text with only letters, digits
 /// and ` .#_-` (anything else becomes a space), at most 60 characters. Clients compare with this.

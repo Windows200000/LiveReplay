@@ -123,10 +123,9 @@ What's planned, what's done, and the project rules. Kept up to date with every c
       certificate or a false-positive report to Microsoft would settle it for good
 
 #### Web viewer
-- [ ] 3D data missing on the server: a popup, and the view switches back to 2D. When the data is being uploaded right
-      now: show how much of it is there (percent) and switch to 3D when it is complete, unless the user went back to 2D
 - [ ] Multi-POV while live: verify with two real players in one live battle (built and tested with uploads simulated
-      on a local server; the other viewpoints are fetched incrementally while live)
+      on a local server; the other viewpoints are fetched incrementally while live). Note (user): replays are recorded
+      fully on each client, so with lag two viewpoints can disagree slightly; close enough not to matter much
 
 #### Server (wot.arne.my)
 Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
@@ -135,6 +134,9 @@ Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
 - [ ] Clean up the duplicate test entries on wot.arne.my (admin delete of the player, after the next deploy)
 
 ### Done
+- Website, 3D data missing on the server: a popup says so and the view goes back to 2D. If a player's app is uploading
+  it right now (the app announces its 3D files first; the server tracks upload progress, `GET /api/asset-status`), the
+  view shows how much has arrived in percent and switches to 3D when it is complete, unless the user went back to 2D
 - Identical battles recognised (user request; their idea: same players at the same second): by the game's
   `arenaUniqueID`, read from the replay's first packet (checked: equals the results' arenaUniqueID). The same
   uploader sending the same battle again (app restart, the finished replay of a live upload) continues its entry,
