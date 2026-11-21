@@ -473,14 +473,14 @@ fn shown(s: &Stored, t: u64) -> BattleInfo {
 fn remove_duplicates(data: &Path, st: &mut State) -> usize {
     let mut ids: Vec<&Stored> = st.battles.values().filter(|s| s.arena_id == 0 && s.info.file_name.is_empty()).collect();
     ids.sort_by_key(|s| s.created);
-    let mut drop = Vec::new();
+    let mut drop = std::collections::HashSet::new();
     for (i, a) in ids.iter().enumerate() {
         if drop.contains(&a.info.id) {
             continue;
         }
         let tanks: std::collections::HashSet<i32> = a.vehicle_ids.iter().copied().collect();
         let mut same: Vec<&Stored> = vec![a];
-        for b in &ids[i + 1..] {
+        for b in ids[i + 1..].iter().filter(|b| !drop.contains(&b.info.id)) {
             if b.owner == a.owner && b.info.player == a.info.player && b.info.map == a.info.map && b.vehicle_ids.iter().filter(|v| tanks.contains(v)).count() >= 3 {
                 same.push(b);
             }
@@ -1169,6 +1169,34 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stored(id: &str, owner: &str, map: &str, tanks: &[i32], size: u64, created: u64) -> Stored {
+        let info = BattleInfo { id: id.into(), player: "p".into(), map: map.into(), size, live: true, ..Default::default() };
+        Stored { info, owner: owner.into(), created, vehicle_ids: tanks.to_vec(), players: vec![], arena_id: 0 }
+    }
+
+    #[test]
+    fn duplicate_live_uploads() {
+        let dir = std::env::temp_dir().join(format!("lr-dup-test-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("battles")).unwrap();
+        let mut st = State::default();
+        // One battle uploaded three times (app restarts), one other battle on the same map,
+        // and the same battle from another uploader: only the two extra copies go.
+        for s in [
+            stored("a1", "k", "m", &[1, 2, 3, 4], 100, 1),
+            stored("a2", "k", "m", &[1, 2, 3, 4, 5], 900, 2),
+            stored("a3", "k", "m", &[2, 3, 4], 300, 3),
+            stored("b1", "k", "m", &[7, 8, 9], 500, 4),
+            stored("c1", "other", "m", &[1, 2, 3, 4], 100, 5),
+        ] {
+            st.battles.insert(s.info.id.clone(), s);
+        }
+        assert_eq!(remove_duplicates(&dir, &mut st), 2);
+        let mut left: Vec<&String> = st.battles.keys().collect();
+        left.sort();
+        assert_eq!(left, ["a2", "b1", "c1"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn helpers() {

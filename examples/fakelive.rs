@@ -1,5 +1,6 @@
 //! Developer tool: play a finished replay to a server as if it were a live battle.
 //! `fakelive <server> <replay> [speed]` — prints a viewing code, sends a frame every 2 s.
+//! FAKELIVE_KEY / FAKELIVE_PLAYER: run several as different uploaders of the same battle.
 use livereplay::gamedata::{find_game_dir, GameData};
 use livereplay::net::api::*;
 use livereplay::replay::{battle::Battle, defs::Definitions, wire};
@@ -11,8 +12,11 @@ fn main() -> anyhow::Result<()> {
     let gd = GameData::new(find_game_dir("").expect("game dir"));
     let defs = Definitions::load(&gd)?;
     let full = Battle::load(std::path::Path::new(file), &gd, &defs)?;
-    let key = "fakelive-test-key-0123456789abcdef0123456789";
-    let nb = NewBattle { player: "live_tester".into(), realm: full.server_realm.clone(), map: full.map.clone(), map_display: full.map_display.clone(),
+    // Several fake uploaders of one battle (multi-POV tests): FAKELIVE_KEY / FAKELIVE_PLAYER.
+    let key = std::env::var("FAKELIVE_KEY").unwrap_or_else(|_| "fakelive-test-key-0123456789abcdef0123456789".into());
+    let key = key.as_str();
+    let player = std::env::var("FAKELIVE_PLAYER").unwrap_or_else(|_| "live_tester".into());
+    let nb = NewBattle { player, realm: full.server_realm.clone(), map: full.map.clone(), map_display: full.map_display.clone(),
         mode: "Test".into(), tank: "Test tank".into(), date: "20.11.2026 12:00:00".into(), version: String::new(), live: true, file_name: String::new(), arena_id: full.arena_id,
         vehicle_ids: full.vehicles.keys().copied().collect(), players: vec![] };
     let info: BattleInfo = ureq::post(&format!("{server}/api/battles")).set(KEY_HEADER, key).send_json(&nb)?.into_json()?;

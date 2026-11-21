@@ -117,23 +117,26 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 - [ ] Notice about new releases + self-update replacing the exe, both on by default, both switchable in Settings; an
       update installed while in the tray restarts by itself when no battle or upload is running. Windows: done (tested
       with a local fake release). macOS/Linux: to do (notice only until then)
-- [ ] Battles that end without results (left early: upload now, re-send when the game's results arrive; game crash or
-      disconnect: keep a copy of `temp.wotreplay` and upload it as interrupted) — proposal, waiting for the user's OK
-- [ ] Defender false positive: keep away from malware-like patterns (done: no registry Run entry); a code-signing
-      certificate or a false-positive report to Microsoft would settle it for good
 
 #### Web viewer
-- [ ] Multi-POV while live: verify with two real players in one live battle (built and tested with uploads simulated
-      on a local server; the other viewpoints are fetched incrementally while live). Note (user): replays are recorded
-      fully on each client, so with lag two viewpoints can disagree slightly; close enough not to matter much
 
 #### Server (wot.arne.my)
 Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
-- [ ] A live upload that stops without a final upload (app closed, crash) stays as a partial battle after the 90 s:
-      part of "battles that end without results" (Desktop app)
-- [ ] Clean up the duplicate test entries on wot.arne.my (admin delete of the player, after the next deploy)
 
 ### Done
+- Battles that end without results: an upload without results is sent again once the game's results show up (checked
+  every minute for 24 h; also works for recordings without header, whose tanks identify the battle); a recording that
+  stops growing for 5 minutes (game crash, disconnect) is copied (the game reuses its temp file) and uploaded marked
+  "interrupted"; if the app was closed during a battle, that battle is uploaded at the next start (its replay, or the
+  stopped recording). A live upload that went quiet without being finished is shown as interrupted. Dates of such
+  recordings come from the battle id (its start time). Tested on a local server with a separate settings folder
+- Duplicate live entries from app restarts (before battles were recognised by their id) are removed when the server
+  starts: same uploader, player and map, live data only, at least 3 tanks in common; the most complete one stays
+- Multi-POV during a live battle verified with two uploaders sending the same battle live at the same time (local
+  server): one live list entry with both names, the other viewpoint fetched in full once, then only what is new.
+  Note (user): replays are recorded on each client, so with lag two viewpoints can disagree slightly; close enough
+- Defender false positive (`Trojan:Win32/Bearfoos.A!ml`, from the registry Run entry) avoided: start-up via a Startup
+  folder shortcut, the exe scans clean. Code signing or a report to Microsoft would be the user's to do
 - Website, 3D data missing on the server: a popup says so and the view goes back to 2D. If a player's app is uploading
   it right now (the app announces its 3D files first; the server tracks upload progress, `GET /api/asset-status`), the
   view shows how much has arrived in percent and switches to 3D when it is complete, unless the user went back to 2D
