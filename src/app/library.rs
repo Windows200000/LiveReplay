@@ -82,7 +82,13 @@ pub fn mode_label(bonus_type: i64, gameplay: &str, game: Option<&GameData>) -> S
 /// parsed packets; the date is when the game created the file (the battle's start).
 pub fn live_entry(path: &Path, b: &crate::replay::battle::Battle, game: &GameData) -> ReplayEntry {
     let me = b.recorder_vehicle.and_then(|id| b.vehicles.get(&id));
-    let started = std::fs::metadata(path).and_then(|m| m.created().or_else(|_| m.modified())).unwrap_or_else(|_| std::time::SystemTime::now());
+    // The battle id's low 32 bits are its start (Unix seconds); else when the file was made.
+    let from_id = b.arena_id & 0xffff_ffff;
+    let started = if (1_500_000_000..4_000_000_000).contains(&from_id) {
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(from_id)
+    } else {
+        std::fs::metadata(path).and_then(|m| m.created().or_else(|_| m.modified())).unwrap_or_else(|_| std::time::SystemTime::now())
+    };
     ReplayEntry {
         path: path.to_string_lossy().into_owned(),
         player_name: b.player_name.clone(),

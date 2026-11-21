@@ -588,6 +588,7 @@ impl WebApp {
                 ui.heading(RichText::new("LiveReplay").strong());
                 ui.label(RichText::new("World of Tanks battles on the minimap").color(Color32::from_gray(150)));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.hyperlink_to("Impressum", "/impressum");
                     ui.hyperlink_to("Privacy", "/privacy");
                     ui.hyperlink_to("Licences", "https://github.com/Windows200000/LiveReplay/blob/main/THIRD_PARTY_LICENSES.md");
                     ui.add_space(8.0);
@@ -676,7 +677,8 @@ impl WebApp {
                         ui.painter().rect_filled(rect, 3.0, Color32::from_white_alpha(14));
                     }
                     let date = b.date.get(..16).unwrap_or(&b.date).to_string();
-                    let cells = [date, names(b), b.tank.clone(), b.map_display.clone(), b.mode.clone(), b.damage.to_string()];
+                    let mode = if b.interrupted { format!("{} (interrupted)", b.mode) } else { b.mode.clone() };
+                    let cells = [date, names(b), b.tank.clone(), b.map_display.clone(), mode, b.damage.to_string()];
                     let mut x = rect.left() + 6.0;
                     for ((_, w), c) in COLS.iter().zip(cells) {
                         let clip = egui::Rect::from_min_max(egui::pos2(x, rect.top()), egui::pos2(x + w - 8.0, rect.bottom()));

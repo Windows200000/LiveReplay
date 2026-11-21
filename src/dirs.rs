@@ -6,8 +6,11 @@ fn project() -> Option<directories::ProjectDirs> {
     directories::ProjectDirs::from("", "", "LiveReplay")
 }
 
-/// Settings and the replay index.
+/// Settings and the replay index (`LIVEREPLAY_HOME`: somewhere else, for tests).
 pub fn config_dir() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("LIVEREPLAY_HOME") {
+        return Some(PathBuf::from(home).join("config"));
+    }
     project().map(|p| p.config_dir().to_path_buf())
 }
 

@@ -20,6 +20,76 @@ const LIVE_EVERY: Duration = Duration::from_secs(4);
 const LIVE_OVERLAP: f32 = 2.0;
 /// After a live battle the game writes the final replay; wait this long for it.
 const FINAL_WAIT: Duration = Duration::from_secs(120);
+/// `temp.wotreplay` not growing for this long: the battle was interrupted (game crash,
+/// disconnect); what was recorded is uploaded as such.
+const INTERRUPTED_AFTER: Duration = Duration::from_secs(300);
+
+/// `INTERRUPTED_AFTER`, shorter for tests (`LIVEREPLAY_INTERRUPTED_SECS`).
+fn interrupted_after() -> Duration {
+    std::env::var("LIVEREPLAY_INTERRUPTED_SECS").ok().and_then(|s| s.parse().ok()).map(Duration::from_secs).unwrap_or(INTERRUPTED_AFTER)
+}
+/// Uploads without battle results are sent again once the game's results show up, for this long.
+const RESULTS_WAIT_SECS: u64 = 24 * 3600;
+
+/// An uploaded battle still without results.
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct Pending {
+    path: PathBuf,
+    id: String,
+    ids: Vec<i32>,
+    interrupted: bool,
+    since: u64,
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+fn pending_path() -> Option<PathBuf> {
+    crate::dirs::config_dir().map(|d| d.join("pending_results.json"))
+}
+
+fn load_pending() -> Vec<Pending> {
+    pending_path().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+fn save_pending(v: &[Pending]) {
+    if let (Some(p), Ok(b)) = (pending_path(), serde_json::to_vec(v)) {
+        let _ = std::fs::write(p, b);
+    }
+}
+
+/// A battle being played when the app was last running: (Unix seconds it started).
+fn marker_path() -> Option<PathBuf> {
+    crate::dirs::config_dir().map(|d| d.join("battle_in_progress.json"))
+}
+
+fn set_marker(started: SystemTime) {
+    let secs = started.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    if let Some(p) = marker_path() {
+        let _ = std::fs::write(p, secs.to_string());
+    }
+}
+
+fn clear_marker() {
+    if let Some(p) = marker_path() {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+fn read_marker() -> Option<u64> {
+    std::fs::read_to_string(marker_path()?).ok()?.trim().parse().ok()
+}
+
+/// Where recordings of interrupted battles are kept (the game reuses its temp file).
+fn interrupted_dir() -> Option<PathBuf> {
+    crate::dirs::config_dir().map(|d| d.join("interrupted"))
+}
+
+/// A complete .wotreplay (with header), not a recording in progress.
+fn full_replay(raw: &[u8]) -> bool {
+    raw.len() > 12 && raw[..4] == [0x12, 0x32, 0x34, 0x11]
+}
 
 pub fn server_url() -> String {
     std::env::var("LIVEREPLAY_SERVER").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| crate::net::SERVER_URL.to_string()).trim_end_matches('/').to_string()
@@ -149,7 +219,7 @@ impl Uploader {
         let status = Arc::new(Mutex::new(Status::default()));
         let live = Arc::new(AtomicBool::new(cfg.upload_live));
         let (st, lv) = (status.clone(), live.clone());
-        std::thread::spawn(move || Worker { cfg, status: st, live: lv, checked: HashSet::new(), current: None, last_archive: Instant::now() }.run(rx));
+        std::thread::spawn(move || Worker { cfg, status: st, live: lv, checked: HashSet::new(), current: None, last_archive: Instant::now(), pending: load_pending() }.run(rx));
         Uploader { jobs: tx, status, live }
     }
 
@@ -166,7 +236,7 @@ impl Uploader {
 
 /// Upload replays right now on this thread (command line `--upload`); the web link of each.
 pub fn upload_files(cfg: &Config, paths: &[PathBuf]) -> Vec<Result<String, String>> {
-    let mut w = Worker { cfg: cfg.clone(), status: Default::default(), live: Default::default(), checked: HashSet::new(), current: None, last_archive: Instant::now() };
+    let mut w = Worker { cfg: cfg.clone(), status: Default::default(), live: Default::default(), checked: HashSet::new(), current: None, last_archive: Instant::now(), pending: load_pending() };
     paths.iter().map(|p| w.upload_replay(p, None).map(|id| battle_link(&id))).collect()
 }
 
@@ -178,6 +248,10 @@ struct LiveUpload {
     started: SystemTime,
     /// Set when `temp.wotreplay` went away: waiting for the final replay.
     ended: Option<Instant>,
+    /// When `temp.wotreplay` last grew.
+    changed: Instant,
+    /// Already uploaded as interrupted (it stopped growing).
+    interrupted: bool,
 }
 
 struct Worker {
@@ -188,6 +262,8 @@ struct Worker {
     checked: HashSet<String>,
     current: Option<LiveUpload>,
     last_archive: Instant,
+    /// Uploads waiting for their battle results.
+    pending: Vec<Pending>,
 }
 
 impl Worker {
@@ -196,6 +272,11 @@ impl Worker {
     }
 
     fn run(mut self, rx: mpsc::Receiver<Job>) {
+        if self.live.load(Ordering::Relaxed) {
+            if let Err(e) = self.catch_up() {
+                self.say(format!("Upload: {e}"));
+            }
+        }
         loop {
             match rx.recv_timeout(LIVE_EVERY) {
                 Ok(Job::Config(c)) => self.cfg = c,
@@ -228,6 +309,7 @@ impl Worker {
             if self.last_archive.elapsed() > Duration::from_secs(60) {
                 self.last_archive = Instant::now();
                 crate::replay::cached_results::archive_new();
+                self.retry_pending();
             }
             if self.live.load(Ordering::Relaxed) {
                 if let Err(e) = self.live_tick() {
@@ -302,6 +384,11 @@ impl Worker {
 
     /// Send a finished replay (complete, replacing whatever the server had for `id`).
     fn upload_replay(&mut self, path: &Path, id: Option<String>) -> Result<String, String> {
+        self.upload_replay_as(path, id, false)
+    }
+
+    /// `interrupted`: a recording that stopped before the battle ended (shown as such).
+    fn upload_replay_as(&mut self, path: &Path, id: Option<String>, interrupted: bool) -> Result<String, String> {
         let engine = self.engine()?;
         let battle = Battle::load(path, &engine.game, &engine.defs).map_err(|e| e.to_string())?;
         let id = match id {
@@ -322,12 +409,21 @@ impl Worker {
         let version = super::library::summarize(path, Some(&engine.game)).map(|e| e.version).unwrap_or_default();
         self.ensure_assets(&engine, &battle.map, &version)?;
         let damage = super::library::summarize(path, Some(&engine.game)).map(|e| e.damage).unwrap_or(0);
-        post_bytes(&self.cfg.upload_key, &format!("/api/battles/{id}/frames?reset=1&finish=1&damage={damage}"), &wire::encode_frame(&battle, 0.0))?;
+        let flag = if interrupted { "&interrupted=1" } else { "" };
+        post_bytes(&self.cfg.upload_key, &format!("/api/battles/{id}/frames?reset=1&finish=1&damage={damage}{flag}"), &wire::encode_frame(&battle, 0.0))?;
         // The original replay file too (kept private on the server, for features that need more of it later).
         if let Ok(raw) = std::fs::read(path) {
-            agent().put(&format!("{}/api/battles/{id}/replay", server_url())).set(api::KEY_HEADER, &self.cfg.upload_key).send_bytes(&raw).map_err(err)?;
+            if full_replay(&raw) {
+                agent().put(&format!("{}/api/battles/{id}/replay", server_url())).set(api::KEY_HEADER, &self.cfg.upload_key).send_bytes(&raw).map_err(err)?;
+            }
         }
         remember(&file_name(path), &id);
+        // No battle results yet (left early, interrupted): sent again once the game has them.
+        self.pending.retain(|p| p.id != id);
+        if battle.vehicles.values().all(|v| v.final_stats.is_none()) {
+            self.pending.push(Pending { path: path.to_path_buf(), id: id.clone(), ids: battle.vehicles.keys().copied().collect(), interrupted, since: now_secs() });
+        }
+        save_pending(&self.pending);
         // 3D data for the web viewer (after the battle only: building it is heavy).
         if let Err(e) = self.ensure_3d(&engine, &battle, &version) {
             self.say(format!("3D data upload: {e}"));
@@ -403,16 +499,24 @@ impl Worker {
         // After a battle the game leaves the file in place, empty: that counts as no battle.
         match std::fs::metadata(&temp).ok().map(|m| m.len()).filter(|&l| l > 0) {
             Some(len) => {
-                if self.current.as_ref().is_some_and(|c| c.last_len == len && c.ended.is_none()) {
+                if let Some(c) = self.current.as_mut().filter(|c| c.last_len == len && c.ended.is_none()) {
+                    // Not growing any more: the game crashed or lost the connection.
+                    if !c.interrupted && c.changed.elapsed() > interrupted_after() {
+                        c.interrupted = true;
+                        let id = c.id.clone();
+                        return self.upload_interrupted(&temp, id);
+                    }
                     return Ok(());
                 }
                 // Only when the battle is over (the default): nothing is sent while it is played.
                 if !self.cfg.upload_during_battle {
                     if self.current.as_ref().map_or(true, |c| len < c.last_len) {
-                        self.current = Some(LiveUpload { id: None, key: Default::default(), sent_until: 0.0, last_len: len, started: SystemTime::now(), ended: None });
+                        self.current = Some(LiveUpload { id: None, key: Default::default(), sent_until: 0.0, last_len: len, started: SystemTime::now(), ended: None, changed: Instant::now(), interrupted: false });
+                        set_marker(SystemTime::now());
                     }
                     let c = self.current.as_mut().unwrap();
                     c.last_len = len;
+                    c.changed = Instant::now();
                     c.ended = None;
                     return Ok(());
                 }
@@ -421,7 +525,8 @@ impl Worker {
                 let key = (battle.map.clone(), battle.recorder_vehicle.unwrap_or(0));
                 if self.current.as_ref().map_or(true, |c| c.key != key || len < c.last_len) {
                     self.finish_previous();
-                    self.current = Some(LiveUpload { id: None, key, sent_until: 0.0, last_len: 0, started: SystemTime::now(), ended: None });
+                    self.current = Some(LiveUpload { id: None, key, sent_until: 0.0, last_len: 0, started: SystemTime::now(), ended: None, changed: Instant::now(), interrupted: false });
+                    set_marker(SystemTime::now());
                 }
                 if self.current.as_ref().unwrap().id.is_none() {
                     let info = self.new_battle(&engine, &temp, &battle, true)?;
@@ -437,6 +542,7 @@ impl Worker {
                 post_bytes(&self.cfg.upload_key, &format!("/api/battles/{id}/frames{reset}"), &wire::encode_frame(&battle, from))?;
                 c.sent_until = battle.duration;
                 c.last_len = len;
+                c.changed = Instant::now();
                 c.ended = None;
                 self.say(format!("Live battle on {} is being uploaded", battle.map_display));
             }
@@ -461,6 +567,7 @@ impl Worker {
                         self.current = None;
                         self.say("Uploading the finished battle");
                         self.upload_replay(&p, id)?;
+                        clear_marker();
                         self.say("Battle uploaded");
                     }
                 } else if ended.elapsed() > FINAL_WAIT {
@@ -469,6 +576,73 @@ impl Worker {
             }
         }
         Ok(())
+    }
+
+    /// The battle stopped without its replay (game crash, disconnect): keep a copy of what the
+    /// game recorded (it reuses its temp file) and upload that, marked as interrupted.
+    fn upload_interrupted(&mut self, temp: &Path, id: Option<String>) -> Result<(), String> {
+        let dir = interrupted_dir().ok_or("no app folder")?;
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let copy = dir.join(format!("interrupted_{}.wotreplay", now_secs()));
+        std::fs::copy(temp, &copy).map_err(|e| e.to_string())?;
+        self.say("The battle stopped (game closed or connection lost): uploading what was recorded");
+        self.upload_replay_as(&copy, id, true)?;
+        clear_marker();
+        self.say("Interrupted battle uploaded");
+        Ok(())
+    }
+
+    /// The app was closed during a battle: upload that battle now (its replay, or what the game
+    /// recorded if the game stopped too).
+    fn catch_up(&mut self) -> Result<(), String> {
+        let Some(started) = read_marker() else { return Ok(()) };
+        let dir = PathBuf::from(&self.cfg.replays_dir);
+        let since = std::time::UNIX_EPOCH + Duration::from_secs(started.saturating_sub(60));
+        let replay = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "wotreplay") && e.file_name() != "temp.wotreplay")
+            .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+            .filter(|(m, _)| *m >= since)
+            .max_by_key(|(m, _)| *m)
+            .map(|(_, p)| p);
+        if let Some(p) = replay {
+            if !uploaded().contains_key(&file_name(&p)) {
+                self.say("Uploading the battle played while LiveReplay was closed");
+                self.upload_replay(&p, None)?;
+            }
+            clear_marker();
+            return Ok(());
+        }
+        let temp = dir.join("temp.wotreplay");
+        let stale = std::fs::metadata(&temp)
+            .ok()
+            .filter(|m| m.len() > 0)
+            .and_then(|m| m.modified().ok())
+            .is_some_and(|m| m >= since && m.elapsed().is_ok_and(|e| e > interrupted_after()));
+        if stale {
+            self.upload_interrupted(&temp, None)?;
+        } else if std::fs::metadata(&temp).map_or(true, |m| m.len() == 0) {
+            // Nothing left of it.
+            clear_marker();
+        }
+        // Otherwise the battle is still running: the live tick takes it from here.
+        Ok(())
+    }
+
+    /// Battles uploaded without results: once the game has them (it writes them a while after
+    /// the battle, also when it was left early), send the battle again with them.
+    fn retry_pending(&mut self) {
+        let t = now_secs();
+        self.pending.retain(|p| t.saturating_sub(p.since) < RESULTS_WAIT_SECS && p.path.exists());
+        let ready: Vec<Pending> = self.pending.iter().filter(|p| crate::replay::cached_results::results_for(&p.ids).is_some()).cloned().collect();
+        for p in ready {
+            if self.upload_replay_as(&p.path, Some(p.id.clone()), p.interrupted).is_ok() {
+                self.say("Battle results added to an uploaded battle");
+            }
+        }
+        save_pending(&self.pending);
     }
 
     /// Mark the current live upload finished as it is (no final replay came).

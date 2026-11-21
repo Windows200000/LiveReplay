@@ -335,6 +335,10 @@ impl App {
                 web.insert(format!("/{rel}"), StaticFile { body, gz, br, etag, ctype });
             }
         }
+        let removed = remove_duplicates(&data, &mut st);
+        if removed > 0 {
+            println!("removed {removed} duplicate live uploads");
+        }
         // Expired viewing codes are deleted.
         let t = now();
         st.codes.retain(|_, c| c.expires > t);
@@ -452,6 +456,49 @@ fn is_live(s: &Stored, t: u64) -> bool {
     s.info.live && t.saturating_sub(s.info.updated) < STALE_SECS
 }
 
+/// A battle as shown: a live upload that stopped without being finished is interrupted.
+fn shown(s: &Stored, t: u64) -> BattleInfo {
+    let mut i = s.info.clone();
+    if s.info.live && !is_live(s, t) {
+        i.live = false;
+        i.interrupted = true;
+    }
+    i
+}
+
+/// Live uploads of one battle that app restarts made into several entries (before battles were
+/// recognised by their id): the most complete one stays. Same uploader, player and map, only
+/// live data (no replay file name), and at least 3 tanks in common, so different battles on the
+/// same map are never merged.
+fn remove_duplicates(data: &Path, st: &mut State) -> usize {
+    let mut ids: Vec<&Stored> = st.battles.values().filter(|s| s.arena_id == 0 && s.info.file_name.is_empty()).collect();
+    ids.sort_by_key(|s| s.created);
+    let mut drop = Vec::new();
+    for (i, a) in ids.iter().enumerate() {
+        if drop.contains(&a.info.id) {
+            continue;
+        }
+        let tanks: std::collections::HashSet<i32> = a.vehicle_ids.iter().copied().collect();
+        let mut same: Vec<&Stored> = vec![a];
+        for b in &ids[i + 1..] {
+            if b.owner == a.owner && b.info.player == a.info.player && b.info.map == a.info.map && b.vehicle_ids.iter().filter(|v| tanks.contains(v)).count() >= 3 {
+                same.push(b);
+            }
+        }
+        if same.len() > 1 {
+            let keep = same.iter().max_by_key(|s| (s.info.size, s.info.updated)).map(|s| s.info.id.clone()).unwrap_or_default();
+            drop.extend(same.iter().map(|s| s.info.id.clone()).filter(|id| *id != keep));
+        }
+    }
+    for id in &drop {
+        for ext in ["bin", "json", "wotreplay"] {
+            let _ = std::fs::remove_file(data.join("battles").join(format!("{id}.{ext}")));
+        }
+        st.battles.remove(id);
+    }
+    drop.len()
+}
+
 fn is_live_info(st: &State, id: &str, t: u64) -> bool {
     st.battles.get(id).is_some_and(|s| is_live(s, t))
 }
@@ -481,6 +528,7 @@ fn route(app: &App, rq: &mut Request) -> Reply {
     match (&method, parts.as_slice()) {
         (Method::Post, ["api", "battles"]) => new_battle(app, rq),
         (Method::Get, ["privacy"]) => Reply { status: 200, body: privacy::page().into_bytes(), ctype: "text/html; charset=utf-8", headers: vec![], compress: true },
+        (Method::Get, ["legal" | "impressum"]) => Reply { status: 200, body: privacy::legal().into_bytes(), ctype: "text/html; charset=utf-8", headers: vec![], compress: true },
         (Method::Delete, ["api", "battles", id]) => {
             let Some(owner) = key_hash(rq) else { return Reply::err(401, "key required") };
             let mut st = app.st();
@@ -557,7 +605,7 @@ fn route(app: &App, rq: &mut Request) -> Reply {
         (Method::Get, ["api", "battles", id]) => {
             let st = app.st();
             match st.battles.get(*id) {
-                Some(s) if !is_live(s, now()) || unlocked(&st, rq).0.contains(&s.owner) => Reply::json(&s.info),
+                Some(s) if !is_live(s, now()) || unlocked(&st, rq).0.contains(&s.owner) => Reply::json(&shown(s, now())),
                 _ => Reply::err(404, "not found"),
             }
         }
@@ -859,6 +907,7 @@ fn new_battle(app: &App, rq: &mut Request) -> Reply {
         group: String::new(),
         replay_size: 0,
         uploaders: Vec::new(),
+        interrupted: false,
     };
     let mut info = info;
     // Another player's upload of the same battle: the same arenaUniqueID (also while live);
@@ -935,6 +984,7 @@ fn frames(app: &App, rq: &mut Request, id: &str, q: &str) -> Reply {
     s.info.updated = now();
     if query(q, "finish").is_some() {
         s.info.live = false;
+        s.info.interrupted = query(q, "interrupted").is_some();
     }
     if let Some(d) = query(q, "damage").and_then(|d| d.parse::<i64>().ok()) {
         s.info.damage = d.clamp(0, 1_000_000);
@@ -1001,11 +1051,11 @@ fn list(app: &App, rq: &Request, q: &str) -> Reply {
     let t = now();
     // A group's live members too, for whoever may see them (viewing code, or the uploader).
     let owners = if group.is_empty() { Vec::new() } else { unlocked(&st, rq).0 };
-    let mut v: Vec<&BattleInfo> = st
+    let mut v: Vec<BattleInfo> = st
         .battles
         .values()
         .filter(|s| (!is_live(s, t) || owners.contains(&s.owner)) && s.info.size > 0)
-        .map(|s| &s.info)
+        .map(|s| shown(s, t))
         .filter(|i| player.is_empty() || i.player.to_lowercase().contains(&player))
         .filter(|i| group.is_empty() || i.group == group)
         .collect();
@@ -1017,7 +1067,6 @@ fn list(app: &App, rq: &Request, q: &str) -> Reply {
         }
     };
     v.sort_by_cached_key(|b| std::cmp::Reverse(key(&b.date)));
-    let mut v: Vec<BattleInfo> = v.into_iter().cloned().collect();
     // The battle list: one entry per battle; a group's own list: every viewpoint.
     if group.is_empty() {
         v = one_per_battle(v);

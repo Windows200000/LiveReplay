@@ -133,6 +133,9 @@ pub struct BattleInfo {
     /// In lists: everyone who uploaded this battle (one entry per battle; empty = only `player`).
     #[serde(default)]
     pub uploaders: Vec<String>,
+    /// The recording stopped before the battle ended (game crash, disconnect, app closed).
+    #[serde(default)]
+    pub interrupted: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -1,5 +1,6 @@
-//! The privacy policy page (`/privacy`), filled in from the operator settings
-//! (`OPERATOR_NAME`, `OPERATOR_CONTACT`, optional `OPERATOR_ADDRESS`).
+//! The privacy policy (`/privacy`) and the Impressum (`/impressum`, in English), filled in from the
+//! operator settings (`OPERATOR_NAME`, `OPERATOR_CONTACT`, `OPERATOR_ADDRESS`, optional
+//! `OPERATOR_PHONE`).
 
 fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
@@ -81,8 +82,63 @@ All battles containing your name are removed, usually within a few days and at t
 <h2>Recipients</h2>
 <p>None. Data is stored on the server that hosts this website and is not shared or sold.</p>
 
+<h2>The LiveReplay desktop app</h2>
+<p>The app sends data to this server only when uploading is turned on (see above). To tell you about new versions and
+install them, it asks GitHub (GitHub, Inc., USA) for the latest release a few times a day and downloads it from there;
+GitHub receives your IP address for this (<a href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement">GitHub's privacy statement</a>).
+You can turn this off in the app: Settings &gt; App &gt; <i>Tell me about new versions</i>. The links to GitHub on this
+website (<i>Download the app</i>, <i>Licences</i>) contact GitHub only when you click them.</p>
+
 <p style="margin-top:36px;color:#888">LiveReplay is a fan project and is not affiliated with or endorsed by Wargaming.
-World of Tanks is a trademark of Wargaming.</p>
+World of Tanks is a trademark of Wargaming. <a href="/impressum">Impressum</a></p>
+</main></body></html>"#
+    )
+}
+
+/// Impressum (§ 5 DDG), in English like the rest of the site.
+pub fn legal() -> String {
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+    let name = env("OPERATOR_NAME").map(|n| esc(&n)).unwrap_or_else(|| "(name not configured: set OPERATOR_NAME)".into());
+    let address = env("OPERATOR_ADDRESS")
+        .map(|a| esc(&a).replace(", ", "<br>"))
+        .unwrap_or_else(|| "(postal address not configured: set OPERATOR_ADDRESS)".into());
+    let contact = env("OPERATOR_CONTACT").unwrap_or_else(|| "(contact not configured: set OPERATOR_CONTACT)".into());
+    let contact_html = if contact.contains('@') && !contact.contains(' ') {
+        format!("E-mail: <a href=\"mailto:{0}\">{0}</a>", esc(&contact))
+    } else if contact.starts_with("http") {
+        format!("Contact: <a href=\"{0}\">{0}</a>", esc(&contact))
+    } else {
+        format!("Contact: {}", esc(&contact))
+    };
+    let phone = env("OPERATOR_PHONE").map(|p| format!("<br>Phone: {}", esc(&p))).unwrap_or_default();
+    format!(
+        r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Impressum - LiveReplay</title><link rel="icon" type="image/png" href="/favicon.png">
+<style>
+body {{ margin: 0; background: #1b1c1e; color: #ddd; font: 15px/1.55 system-ui, sans-serif; }}
+main {{ max-width: 760px; margin: 0 auto; padding: 24px 16px 60px; }}
+h1 {{ font-size: 26px; }} h2 {{ font-size: 18px; margin-top: 28px; color: #fff; }}
+a {{ color: #8fd14f; }}
+</style></head><body><main>
+<p><a href="/">&larr; LiveReplay</a></p>
+<h1>Impressum</h1>
+<p style="color:#999">Information according to &sect; 5 DDG</p>
+
+<h2>Operator</h2>
+<p>{name}<br>{address}</p>
+
+<h2>Contact</h2>
+<p>{contact_html}{phone}</p>
+
+<h2>Responsible for the content</h2>
+<p>{name} (address above)</p>
+
+<h2>Notes</h2>
+<p>LiveReplay is a non-commercial fan project. It is not affiliated with or endorsed by Wargaming; World of Tanks is a
+trademark of Wargaming. Battles on this website are uploaded by players; to have battles with your player name removed,
+see the <a href="/privacy">privacy policy</a>. The source code is open:
+<a href="https://github.com/Windows200000/LiveReplay">github.com/Windows200000/LiveReplay</a>.</p>
 </main></body></html>"#
     )
 }

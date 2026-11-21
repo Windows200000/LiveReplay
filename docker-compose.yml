@@ -4,7 +4,8 @@
 #   DOMAIN=wot.arne.my
 #   OPERATOR_NAME=...        # who runs the site (shown on /privacy, GDPR controller)
 #   OPERATOR_CONTACT=...     # e-mail or URL for data requests (shown on /privacy)
-#   OPERATOR_ADDRESS=...     # optional postal address (shown on /privacy)
+#   OPERATOR_ADDRESS=...     # postal address, e.g. "Street 1, 12345 Town, Germany" (Impressum /impressum; also /privacy)
+#   OPERATOR_PHONE=...       # optional phone number (Impressum)
 #   ADMIN_TOKEN=...          # long random string: removal requests (see README)
 #   DATA_PATH=/mnt/data/livereplay   # optional: keep all data in this host folder (e.g. another drive);
 #                                    # the folder must be writable by uid 1000: sudo chown -R 1000:1000 /mnt/data/livereplay
@@ -23,6 +24,7 @@ services:
       - OPERATOR_NAME=${OPERATOR_NAME:-}
       - OPERATOR_CONTACT=${OPERATOR_CONTACT:-}
       - OPERATOR_ADDRESS=${OPERATOR_ADDRESS:-}
+      - OPERATOR_PHONE=${OPERATOR_PHONE:-}
       - ADMIN_TOKEN=${ADMIN_TOKEN:-}
     volumes:
       # Battles, codes, uploaded map data: back this up. A host folder when DATA_PATH is set.

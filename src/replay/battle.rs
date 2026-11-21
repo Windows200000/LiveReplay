@@ -466,11 +466,12 @@ impl Battle {
         };
         #[cfg(target_arch = "wasm32")]
         let cached: Option<serde_json::Value> = None;
-        if let Some(res) = rf.results().or(cached.as_ref()).and_then(|r| r.as_array()).filter(|_| !like_live) {
+        // Results: [results, vehicles (full roster), frags] (the replay's block or the game's cache).
+        let apply_results = |b: &mut Battle, res: &[serde_json::Value]| {
             if let Some(vs) = res.get(1).and_then(|v| v.as_object()) {
                 for (k, v) in vs {
                     if let Ok(id) = k.parse() {
-                        add_roster(&mut b, id, v);
+                        add_roster(b, id, v);
                     }
                 }
             }
@@ -493,6 +494,9 @@ impl Battle {
                     b.winner_team = Some(w as u8);
                 }
             }
+        };
+        if let Some(res) = rf.results().or(cached.as_ref()).and_then(|r| r.as_array()).filter(|_| !like_live) {
+            apply_results(&mut b, res);
         }
 
         let stream = rf.packet_stream()?;
@@ -892,6 +896,15 @@ impl Battle {
             b.server_realm = gd.realm();
         }
         b.live = rf.is_live();
+        // A recording without header (in progress, or interrupted): the game's cached results,
+        // found by the tanks seen in it, once the battle is over on the server.
+        #[cfg(not(target_arch = "wasm32"))]
+        if b.live && !like_live && !b.vehicles.is_empty() && b.vehicles.values().all(|v| v.final_stats.is_none()) {
+            let ids: Vec<i32> = b.vehicles.keys().copied().collect();
+            if let Some(res) = super::cached_results::results_for(&ids).as_ref().and_then(|r| r.as_array()) {
+                apply_results(&mut b, res);
+            }
+        }
         if b.recorder_vehicle.is_none() {
             b.recorder_vehicle = b.vehicles.values().find(|v| v.name == b.player_name).map(|v| v.id);
         }
