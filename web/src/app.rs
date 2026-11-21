@@ -135,6 +135,11 @@ struct Open {
     members: Vec<BattleInfo>,
     shown: Vec<String>,
     others: HashMap<String, Battle>,
+    /// Per other viewpoint: (generation, bytes read), for fetching only what is new while live.
+    other_pos: HashMap<String, (u32, u64)>,
+    other_polling: std::collections::HashSet<String>,
+    /// While live: look again for players who recorded this battle too.
+    next_group: f64,
 }
 
 impl Open {
@@ -278,6 +283,9 @@ impl WebApp {
                 .map(|v| v.split(',').filter(|s| !s.is_empty()).map(String::from).collect())
                 .unwrap_or_default(),
             others: HashMap::new(),
+            other_pos: HashMap::new(),
+            other_polling: Default::default(),
+            next_group: 0.0,
         });
         for other in self.open.as_ref().map(|o| o.shown.clone()).unwrap_or_default() {
             self.fetch_other(ctx, &other);
@@ -301,7 +309,7 @@ impl WebApp {
     fn fetch_other(&self, ctx: &egui::Context, id: &str) {
         let Some(o) = &self.open else { return };
         let (serial, other) = (o.serial, id.to_string());
-        fetch::get(ctx, format!("/api/battles/{id}/data?gen=0&from=0"), String::new(), self.tx.clone(), move |r| Ev::Other(serial, other, r));
+        fetch::get(ctx, format!("/api/battles/{id}/data?gen=0&from=0"), self.codes_header(), self.tx.clone(), move |r| Ev::Other(serial, other, r));
     }
 
     /// Follow the address bar (also the browser's back/forward buttons).
@@ -325,6 +333,7 @@ impl WebApp {
     }
 
     fn handle(&mut self, ctx: &egui::Context, ev: Ev) {
+        let codes = self.codes_header();
         match ev {
             Ev::List(r) => {
                 self.list_loading = false;
@@ -365,7 +374,7 @@ impl WebApp {
                             })
                         });
                         if !info.group.is_empty() {
-                            fetch::get(ctx, format!("/api/battles?group={}", info.group), String::new(), self.tx.clone(), move |r| {
+                            fetch::get(ctx, format!("/api/battles?group={}", info.group), codes, self.tx.clone(), move |r| {
                                 Ev::Group(serial, r.and_then(|r| if r.ok() { serde_json::from_slice(&r.body).map_err(|e| e.to_string()) } else { Err(r.text()) }))
                             });
                         }
@@ -382,10 +391,27 @@ impl WebApp {
             }
             Ev::Other(s, id, r) => {
                 let Some(o) = self.open.as_mut().filter(|o| o.serial == s) else { return };
-                if let Some(b) = r.ok().filter(|r| r.ok()).and_then(|r| wire::decode_battle(&r.body)) {
-                    o.others.insert(id, b);
-                    o.push_update();
+                o.other_polling.remove(&id);
+                let Some(r) = r.ok().filter(|r| r.ok()) else { return };
+                let gen = r.header(GEN_HEADER).and_then(|g| g.parse().ok()).unwrap_or(0);
+                let (old_gen, offset) = o.other_pos.get(&id).copied().unwrap_or((0, 0));
+                if gen != old_gen || !o.others.contains_key(&id) {
+                    if let Some(b) = wire::decode_battle(&r.body) {
+                        o.others.insert(id.clone(), b);
+                    }
+                    o.other_pos.insert(id, (gen, r.body.len() as u64));
+                } else {
+                    let (chunks, used) = wire::decode_frames(&r.body);
+                    let mut b = o.others.remove(&id);
+                    for c in chunks {
+                        b = Some(wire::apply(b, c));
+                    }
+                    if let Some(b) = b {
+                        o.others.insert(id.clone(), b);
+                    }
+                    o.other_pos.insert(id, (gen, offset + used as u64));
                 }
+                o.push_update();
             }
             Ev::Map(s, r) => {
                 let Some(o) = self.open.as_mut().filter(|o| o.serial == s) else { return };
@@ -542,7 +568,7 @@ impl WebApp {
                     ui.label(RichText::new(hint).color(Color32::from_gray(150)));
                 }
                 for b in &self.live {
-                    let text = format!("LIVE   {}   {}   {}   {}", b.player, b.tank, b.map_display, b.mode);
+                    let text = format!("LIVE   {}   {}   {}   {}", names(b), b.tank, b.map_display, b.mode);
                     if ui.add(egui::Button::new(RichText::new(text).color(Color32::from_rgb(255, 120, 110)))).clicked() {
                         open = Some(b.id.clone());
                     }
@@ -579,7 +605,7 @@ impl WebApp {
                         ui.painter().rect_filled(rect, 3.0, Color32::from_white_alpha(14));
                     }
                     let date = b.date.get(..16).unwrap_or(&b.date).to_string();
-                    let cells = [date, b.player.clone(), b.tank.clone(), b.map_display.clone(), b.mode.clone(), b.damage.to_string()];
+                    let cells = [date, names(b), b.tank.clone(), b.map_display.clone(), b.mode.clone(), b.damage.to_string()];
                     let mut x = rect.left() + 6.0;
                     for ((_, w), c) in COLS.iter().zip(cells) {
                         let clip = egui::Rect::from_min_max(egui::pos2(x, rect.top()), egui::pos2(x + w - 8.0, rect.bottom()));
@@ -627,7 +653,24 @@ impl WebApp {
         if o.live && o.data_done && !o.polling && t >= o.next_poll {
             o.polling = true;
             let serial = o.serial;
-            fetch::get(ctx, format!("/api/battles/{}/data?gen={}&from={}", o.id, o.gen, o.offset), codes, self.tx.clone(), move |r| Ev::Data(serial, r));
+            fetch::get(ctx, format!("/api/battles/{}/data?gen={}&from={}", o.id, o.gen, o.offset), codes.clone(), self.tx.clone(), move |r| Ev::Data(serial, r));
+            // The other viewpoints shown: only what is new.
+            for id in o.shown.clone() {
+                if o.others.contains_key(&id) && o.other_polling.insert(id.clone()) {
+                    let (gen, from) = o.other_pos.get(&id).copied().unwrap_or((0, 0));
+                    let other = id.clone();
+                    fetch::get(ctx, format!("/api/battles/{id}/data?gen={gen}&from={from}"), codes.clone(), self.tx.clone(), move |r| Ev::Other(serial, other, r));
+                }
+            }
+            // Someone else may start uploading this battle while it runs.
+            if t >= o.next_group {
+                o.next_group = t + 30.0;
+                if let Some(group) = o.info.as_ref().map(|i| if i.group.is_empty() { i.id.clone() } else { i.group.clone() }) {
+                    fetch::get(ctx, format!("/api/battles?group={group}"), codes.clone(), self.tx.clone(), move |r| {
+                        Ev::Group(serial, r.and_then(|r| if r.ok() { serde_json::from_slice(&r.body).map_err(|e| e.to_string()) } else { Err(r.text()) }))
+                    });
+                }
+            }
         }
         if o.live {
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
@@ -653,7 +696,7 @@ impl WebApp {
                             if !o.others.contains_key(&id) {
                                 let serial = o.serial;
                                 let other = id.clone();
-                                fetch::get(ctx, format!("/api/battles/{id}/data?gen=0&from=0"), String::new(), self.tx.clone(), move |r| Ev::Other(serial, other, r));
+                                fetch::get(ctx, format!("/api/battles/{id}/data?gen=0&from=0"), codes.clone(), self.tx.clone(), move |r| Ev::Other(serial, other, r));
                             }
                         } else {
                             o.shown.retain(|x| *x != id);
@@ -719,5 +762,14 @@ impl eframe::App for WebApp {
         } else {
             self.battles_page(ctx);
         }
+    }
+}
+
+/// The player(s) of a battle in a list: everyone who uploaded it.
+fn names(b: &BattleInfo) -> String {
+    if b.uploaders.len() > 1 {
+        b.uploaders.join(", ")
+    } else {
+        b.player.clone()
     }
 }

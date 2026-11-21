@@ -66,6 +66,10 @@ pub struct NewBattle {
     pub live: bool,
     /// Original replay file name (finished replays), to avoid duplicates per player.
     pub file_name: String,
+    /// The game's arenaUniqueID (the same for every player in the battle; 0 = unknown): the
+    /// server recognises the same battle by it (one entry per uploader, viewpoints grouped).
+    #[serde(default)]
+    pub arena_id: u64,
     /// Tank (entity) ids known at upload: recordings of the same battle share them, so the
     /// server can group several players' uploads of one battle.
     pub vehicle_ids: Vec<i32>,
@@ -112,6 +116,9 @@ pub struct BattleInfo {
     pub replay_size: u64,
     /// Same battle uploaded by several players: all of them share this group id (empty = alone).
     pub group: String,
+    /// In lists: everyone who uploaded this battle (one entry per battle; empty = only `player`).
+    #[serde(default)]
+    pub uploaders: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

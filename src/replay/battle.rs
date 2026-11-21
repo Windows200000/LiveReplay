@@ -274,6 +274,9 @@ pub struct Battle {
     pub winner_team: Option<u8>,
     /// Loaded from an in-progress `temp.wotreplay`.
     pub live: bool,
+    /// The game's arenaUniqueID: the same for every player in this battle (0 = unknown).
+    #[serde(default)]
+    pub arena_id: u64,
 }
 
 /// Clock state shown at the top of the minimap.
@@ -535,7 +538,10 @@ impl Battle {
                         b.player_name = name;
                     }
                     let n = c.u8().unwrap_or(0) as usize;
-                    c.take(n + 8);
+                    c.take(n);
+                    if let Some(id) = c.take(8).and_then(|x| x.try_into().ok()).map(u64::from_le_bytes) {
+                        b.arena_id = id;
+                    }
                     if let Some(arena_type) = c.i32() {
                         b.gameplay_id = arena_type >> 16;
                         if b.gameplay.is_empty() {

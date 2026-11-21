@@ -13,7 +13,7 @@ fn main() -> anyhow::Result<()> {
     let full = Battle::load(std::path::Path::new(file), &gd, &defs)?;
     let key = "fakelive-test-key-0123456789abcdef0123456789";
     let nb = NewBattle { player: "live_tester".into(), realm: full.server_realm.clone(), map: full.map.clone(), map_display: full.map_display.clone(),
-        mode: "Test".into(), tank: "Test tank".into(), date: "20.11.2026 12:00:00".into(), version: String::new(), live: true, file_name: String::new(),
+        mode: "Test".into(), tank: "Test tank".into(), date: "20.11.2026 12:00:00".into(), version: String::new(), live: true, file_name: String::new(), arena_id: full.arena_id,
         vehicle_ids: full.vehicles.keys().copied().collect(), players: vec![] };
     let info: BattleInfo = ureq::post(&format!("{server}/api/battles")).set(KEY_HEADER, key).send_json(&nb)?.into_json()?;
     let code: CodeInfo = ureq::post(&format!("{server}/api/codes")).set(KEY_HEADER, key).send_json(&NewCode { days: 1 })?.into_json()?;

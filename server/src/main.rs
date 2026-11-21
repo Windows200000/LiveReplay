@@ -29,8 +29,9 @@ use tiny_http::{Header, Method, Request, Response, Server};
 
 mod privacy;
 
-/// A live battle not updated for this long counts as finished (client crashed / quit).
-const STALE_SECS: u64 = 30 * 60;
+/// A live battle not updated for this long is no longer live (the app sends every 4 s; it
+/// crashed, was closed, or the battle ended without a final upload).
+const STALE_SECS: u64 = 90;
 const MAX_BODY: usize = 16 << 20;
 const MAX_ASSET: usize = 64 << 20;
 /// Largest original replay file accepted.
@@ -165,6 +166,9 @@ struct Stored {
     /// Lower-case names of everyone in the battle (removal requests).
     #[serde(default)]
     players: Vec<String>,
+    /// The game's arenaUniqueID (0 = unknown): recognises the same battle.
+    #[serde(default)]
+    arena_id: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -408,6 +412,10 @@ fn is_live(s: &Stored, t: u64) -> bool {
     s.info.live && t.saturating_sub(s.info.updated) < STALE_SECS
 }
 
+fn is_live_info(st: &State, id: &str, t: u64) -> bool {
+    st.battles.get(id).is_some_and(|s| is_live(s, t))
+}
+
 /// Owners (key hashes) whose live battles the given codes unlock, and the still-valid codes.
 fn unlocked(st: &State, rq: &Request) -> (Vec<String>, Vec<(String, String, u64)>) {
     let t = now();
@@ -505,7 +513,7 @@ fn route(app: &App, rq: &mut Request) -> Reply {
             write_json(&app.data.join("claims.json"), &st.claims);
             Reply::json(&ids)
         }
-        (Method::Get, ["api", "battles"]) => list(app, q),
+        (Method::Get, ["api", "battles"]) => list(app, rq, q),
         (Method::Get, ["api", "battles", id]) => {
             let st = app.st();
             match st.battles.get(*id) {
@@ -567,6 +575,7 @@ fn route(app: &App, rq: &mut Request) -> Reply {
             };
             let mut battles: Vec<BattleInfo> = st.battles.values().filter(|s| is_live(s, t) && owners.contains(&s.owner)).map(|s| s.info.clone()).collect();
             battles.sort_by(|a, b| b.updated.cmp(&a.updated));
+            let battles = one_per_battle(battles);
             let valid = valid.into_iter().map(|(code, owner, expires)| CodeStatus { code, player: latest_name(&owner), expires }).collect();
             Reply::json(&LiveList { battles, valid })
         }
@@ -695,6 +704,20 @@ fn new_battle(app: &App, rq: &mut Request) -> Reply {
             write_json(&app.data.join("claims.json"), &st.claims);
         }
     }
+    // This uploader's same battle again (the app restarted, or the finished replay of its live
+    // upload): that entry, never a second one.
+    if nb.arena_id != 0 {
+        let same = st.battles.values().find(|s| s.owner == owner && s.arena_id == nb.arena_id && s.info.player == nb.player).map(|s| s.info.id.clone());
+        if let Some(id) = same {
+            let s = st.battles.get_mut(&id).unwrap();
+            if !nb.live && !nb.file_name.is_empty() && s.info.file_name.is_empty() {
+                s.info.file_name = nb.file_name.clone();
+                let s = s.clone();
+                app.save_battle(&s);
+            }
+            return Reply::json(&st.battles[&id].info);
+        }
+    }
     // A finished replay uploaded again: same battle entry.
     if !nb.live && !nb.file_name.is_empty() {
         if let Some(s) = st.battles.values().find(|s| s.owner == owner && s.info.file_name == nb.file_name && s.info.player == nb.player) {
@@ -752,18 +775,24 @@ fn new_battle(app: &App, rq: &mut Request) -> Reply {
         updated: now(),
         group: String::new(),
         replay_size: 0,
+        uploaders: Vec::new(),
     };
     let mut info = info;
-    // Another player's finished upload of the same battle: same realm, map and day, shared tanks.
+    // Another player's upload of the same battle: the same arenaUniqueID (also while live);
+    // for uploads without it, same realm, map and day and shared tanks (finished battles only).
     let day = |d: &str| d.get(..10).unwrap_or("").to_string();
     let mine: std::collections::HashSet<i32> = nb.vehicle_ids.iter().copied().collect();
-    let mate = st
-        .battles
-        .values()
-        .filter(|s| !is_live(s, t) && s.info.realm == info.realm && s.info.map == info.map && day(&s.info.date) == day(&info.date))
-        .filter(|s| !s.info.player.eq_ignore_ascii_case(&info.player))
-        .find(|s| s.vehicle_ids.iter().filter(|v| mine.contains(v)).count() >= 3)
-        .map(|s| s.info.id.clone());
+    let other_player = |s: &&Stored| !s.info.player.eq_ignore_ascii_case(&info.player);
+    let mate = if nb.arena_id != 0 {
+        st.battles.values().filter(other_player).find(|s| s.arena_id == nb.arena_id).map(|s| s.info.id.clone())
+    } else {
+        st.battles
+            .values()
+            .filter(other_player)
+            .filter(|s| s.arena_id == 0 && !is_live(s, t) && s.info.realm == info.realm && s.info.map == info.map && day(&s.info.date) == day(&info.date))
+            .find(|s| s.vehicle_ids.iter().filter(|v| mine.contains(v)).count() >= 3)
+            .map(|s| s.info.id.clone())
+    };
     if let Some(mate) = mate {
         let m = st.battles.get_mut(&mate).unwrap();
         if m.info.group.is_empty() {
@@ -773,7 +802,7 @@ fn new_battle(app: &App, rq: &mut Request) -> Reply {
         }
         info.group = st.battles[&mate].info.group.clone();
     }
-    let s = Stored { info: info.clone(), owner, created: t, vehicle_ids: nb.vehicle_ids, players };
+    let s = Stored { info: info.clone(), owner, created: t, vehicle_ids: nb.vehicle_ids, players, arena_id: nb.arena_id };
     app.save_battle(&s);
     st.battles.insert(id, s);
     Reply::json(&info)
@@ -860,16 +889,39 @@ fn data(app: &App, rq: &mut Request, id: &str, q: &str) -> Reply {
         .header("Cache-Control", if finished && from == 0 { "public, max-age=31536000, immutable" } else { "no-store" })
 }
 
-fn list(app: &App, q: &str) -> Reply {
+/// Several uploads of one battle (a group) shown once: the first, with every uploader's name.
+fn one_per_battle(v: Vec<BattleInfo>) -> Vec<BattleInfo> {
+    let mut names: HashMap<String, Vec<String>> = HashMap::new();
+    for b in v.iter().filter(|b| !b.group.is_empty()) {
+        let n = names.entry(b.group.clone()).or_default();
+        if !n.contains(&b.player) {
+            n.push(b.player.clone());
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    v.into_iter()
+        .filter(|b| b.group.is_empty() || seen.insert(b.group.clone()))
+        .map(|mut b| {
+            if let Some(n) = names.get(&b.group).filter(|n| n.len() > 1) {
+                b.uploaders = n.clone();
+            }
+            b
+        })
+        .collect()
+}
+
+fn list(app: &App, rq: &Request, q: &str) -> Reply {
     let player = query(q, "player").unwrap_or_default().to_lowercase();
     let group = query(q, "group").unwrap_or_default();
     let page = query(q, "page").and_then(|p| p.parse().ok()).unwrap_or(0usize);
     let st = app.st();
     let t = now();
+    // A group's live members too, for whoever may see them (viewing code, or the uploader).
+    let owners = if group.is_empty() { Vec::new() } else { unlocked(&st, rq).0 };
     let mut v: Vec<&BattleInfo> = st
         .battles
         .values()
-        .filter(|s| !is_live(s, t) && s.info.size > 0)
+        .filter(|s| (!is_live(s, t) || owners.contains(&s.owner)) && s.info.size > 0)
         .map(|s| &s.info)
         .filter(|i| player.is_empty() || i.player.to_lowercase().contains(&player))
         .filter(|i| group.is_empty() || i.group == group)
@@ -881,11 +933,15 @@ fn list(app: &App, q: &str) -> Reply {
             _ => d.to_string(),
         }
     };
-    v.sort_by(|a, b| key(&b.date).cmp(&key(&a.date)));
+    v.sort_by_cached_key(|b| std::cmp::Reverse(key(&b.date)));
+    let mut v: Vec<BattleInfo> = v.into_iter().cloned().collect();
+    // The battle list: one entry per battle; a group's own list: every viewpoint.
+    if group.is_empty() {
+        v = one_per_battle(v);
+    }
     let total = v.len();
-    let battles = v.into_iter().skip(page * PER_PAGE).take(PER_PAGE).map(|i| {
-        let mut i = i.clone();
-        i.live = false;
+    let battles = v.into_iter().skip(page * PER_PAGE).take(PER_PAGE).map(|mut i| {
+        i.live = is_live_info(&st, &i.id, t);
         i
     });
     Reply::json(&BattleList { battles: battles.collect(), total, page, per_page: PER_PAGE })

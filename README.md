@@ -125,21 +125,26 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 #### Web viewer
 - [ ] 3D data missing on the server: a popup, and the view switches back to 2D. When the data is being uploaded right
       now: show how much of it is there (percent) and switch to 3D when it is complete, unless the user went back to 2D
-- [ ] Identify identical battles (user): the same battle uploaded by several players, or several times by one player,
-      must be recognised. User's suggestion: same players at the same second (nobody can be in a battle twice). Plan: the
-      game's `arenaUniqueID` (the same for every player in that battle, in every replay), with "same players + same
-      start time" as the fallback for older uploads
-- [ ] Multi-POV (user): with identical battles known, merge every uploader's viewpoint into one battle; this must also
-      work during a live battle already
-- [ ] That battle appears once in the website's lists (live and finished), with the names of all its uploaders
+- [ ] Multi-POV while live: verify with two real players in one live battle (built and tested with uploads simulated
+      on a local server; the other viewpoints are fetched incrementally while live)
 
 #### Server (wot.arne.my)
 Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
-- [ ] Live battles never left the live list (30-minute timeout, and every app restart made a new entry): an entry stops
-      being live 90 s after its last update; the same uploader sending the same battle again continues its entry
+- [ ] A live upload that stops without a final upload (app closed, crash) stays as a partial battle after the 90 s:
+      part of "battles that end without results" (Desktop app)
 - [ ] Clean up the duplicate test entries on wot.arne.my (admin delete of the player, after the next deploy)
 
 ### Done
+- Identical battles recognised (user request; their idea: same players at the same second): by the game's
+  `arenaUniqueID`, read from the replay's first packet (checked: equals the results' arenaUniqueID). The same
+  uploader sending the same battle again (app restart, the finished replay of a live upload) continues its entry,
+  never a second one; other players' uploads of it form a group (also while live). Older uploads without the id: same
+  realm, map, day and shared tanks
+- Multi-POV: every uploader's viewpoint can be merged in, also during a live battle (with a viewing code; the other
+  viewpoints are fetched incrementally like the main one; new uploaders are picked up every 30 s)
+- Lists show such a battle once, with all uploaders' names (finished list and live list)
+- Live list: an entry stops being live 90 s after its last update (was 30 minutes); the app's first live upload after a
+  (re)start replaces the entry's data instead of adding to it
 - Windows tray: the window's X keeps LiveReplay in the tray (setting, on by default); left click on the tray icon opens
   the window, right click has only Quit. In the tray the window is minimised and has no taskbar button, so eframe
   never spins on a window it can't redraw: 0 ms CPU over 15 s. The tray icon has its own thread. Starting LiveReplay

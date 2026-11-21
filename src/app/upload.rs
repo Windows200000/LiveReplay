@@ -293,6 +293,7 @@ impl Worker {
             version: e.version,
             live,
             file_name: if live { String::new() } else { path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default() },
+            arena_id: b.arena_id,
             vehicle_ids: b.vehicles.keys().copied().collect(),
             players: b.vehicles.values().map(|v| v.name.clone()).filter(|n| !n.is_empty()).collect(),
         };
@@ -417,7 +418,9 @@ impl Worker {
                 let c = self.current.as_mut().unwrap();
                 let from = if c.sent_until > 0.0 { (c.sent_until - LIVE_OVERLAP).max(0.001) } else { 0.0 };
                 let id = c.id.clone().unwrap();
-                post_bytes(&self.cfg.upload_key, &format!("/api/battles/{id}/frames"), &wire::encode_frame(&battle, from))?;
+                // The first upload (also after an app restart, onto the same entry) replaces its data.
+                let reset = if from == 0.0 { "?reset=1" } else { "" };
+                post_bytes(&self.cfg.upload_key, &format!("/api/battles/{id}/frames{reset}"), &wire::encode_frame(&battle, from))?;
                 c.sent_until = battle.duration;
                 c.last_len = len;
                 c.ended = None;
