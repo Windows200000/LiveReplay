@@ -1,5 +1,21 @@
+{
+	servers {
+		# Slow clients can't hold the server's workers for long.
+		timeouts {
+			read_header 10s
+			read_body 2m
+			write 5m
+			idle 2m
+		}
+	}
+}
+
 {$DOMAIN} {
 	# No `log` directive on purpose: no access logs, so no IP addresses are stored (privacy policy).
 	# The server compresses text itself; battle data is already compressed.
+	# Largest upload: a 64 MB map pack or original replay.
+	request_body {
+		max_size 70MB
+	}
 	reverse_proxy livereplay:8080
 }

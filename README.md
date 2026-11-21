@@ -72,7 +72,16 @@ stores and serves it, and the web viewer (the same viewer compiled to WebAssembl
   Data lives in the `livereplay-data` volume, or in any host folder when `DATA_PATH` is set in `.env` (e.g. a separate drive:
   `DATA_PATH=/mnt/data/livereplay`; create it and `sudo chown -R 1000:1000` it first, the server runs as uid 1000). Back it up. Without Docker: `cargo build --release -p livereplay-server`,
   `sh web/build.sh`, then run `livereplay-server` (env `BIND`, `DATA_DIR`, `WEB_DIR`, `THREADS`, plus the ones above).
-* Limits (env, optional): `MAX_BATTLES_PER_DAY` (300 per uploader), `MAX_KEY_MB` (2048), `MAX_TOTAL_GB` (50).
+* Limits (env, optional): `MAX_BATTLES_PER_DAY` (300 per uploader), `MAX_NEW_BATTLES_PER_DAY` (3000 for the whole server),
+  `MAX_KEY_MB` (2048), `MAX_TOTAL_GB` (50, battles + original replays + shared game data).
+* Security: the server never runs or interprets uploads. Battle data, original replays and game data are stored as opaque
+  bytes and only served back as `application/octet-stream` with `nosniff` and a sandbox CSP; the small JSON descriptions
+  are parsed into fixed types and every text in them is bounded and stripped of control characters; header values with
+  control characters are never sent. Pages have a strict CSP (own scripts and the wasm only, no framing). Shared game
+  data can only be replaced by the uploader who first sent it (game updates);
+  `curl -X DELETE -H "X-Livereplay-Admin: $ADMIN_TOKEN" https://<domain>/api/admin/assets` resets it all (the next
+  uploads send it again). Container: read-only, no capabilities, no privilege gain, 2 GB memory; Caddy limits request
+  bodies (70 MB) and slow clients.
 * Privacy (GDPR): the policy is served at `/privacy` from the operator settings. No IP addresses or access logs, no cookies,
   no tracking. Uploaders consent in the app before the first upload and can download (`GET /api/me`) or delete
   (`DELETE /api/me`, `DELETE /api/battles/<id>`) their data from Settings. Removal request from a player who didn't upload:
@@ -109,6 +118,14 @@ Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
       Until then uploads from the app fail with a network error (uploading is off by default)
 
 ### Done
+- Security review of the server (independent review + fixes, each checked by an attack test): nothing uploaded is ever run
+  or interpreted. Fixed: header injection through the asset version (could have served a page on the site's origin),
+  anyone overwriting shared game data (now only its first uploader; admin reset), unbounded description fields and
+  server-wide caps (battles/day, names, codes, assets; assets count toward storage), a slow same-battle search under the
+  lock, name squatting by case/realm spelling (names compared case-insensitively), admin token compared in constant time,
+  a panic no longer stops workers; CSP / HSTS / no-referrer headers, the page's script moved out of the HTML; Caddy body
+  limit and timeouts; container read-only without capabilities; binaryen download checked against pinned checksums
+- Asset versions without non-breaking spaces (a header can't carry them, so the app re-uploaded map data after every battle)
 - Live uploads end properly: the game leaves an empty `temp.wotreplay` after a battle, which now counts as "no battle", so
   the finished replay, its original file and the 3D packs are uploaded (3D was missing on the server: 404s)
 - Server: a finished replay that belongs to the uploader's live entry (same player and map, within 10 min) completes that

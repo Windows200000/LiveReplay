@@ -13,6 +13,12 @@ services:
   livereplay:
     build: .
     restart: unless-stopped
+    # Hardening: nothing in the container can be changed except the data folder, no Linux
+    # capabilities, no privilege gain, bounded memory.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 2g
     environment:
       - OPERATOR_NAME=${OPERATOR_NAME:-}
       - OPERATOR_CONTACT=${OPERATOR_CONTACT:-}
@@ -24,6 +30,7 @@ services:
   caddy:
     image: caddy:2
     restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
     ports:
       - "80:80"
       - "443:443"

@@ -18,6 +18,7 @@
 //!   others; `GET` with the owner's key downloads it)
 //! - `GET /api/me` K -> [`MyData`];  `DELETE /api/me` K: delete everything of this uploader;
 //!   `DELETE /api/battles/{id}` K: delete one battle (GDPR access / erasure)
+//! - `DELETE /api/admin/assets` with [`ADMIN_HEADER`]: remove all shared game data (clients upload it again)
 //! - `DELETE /api/admin/players/{name}` with [`ADMIN_HEADER`]: remove every battle a player is in
 //!   and free the name for the next uploader
 //!   (removal requests from players who didn't upload)
@@ -35,6 +36,13 @@ pub const CODES_HEADER: &str = "X-Livereplay-Codes";
 pub const GEN_HEADER: &str = "X-Livereplay-Gen";
 /// Version of an asset (client version it came from).
 pub const VERSION_HEADER: &str = "X-Livereplay-Version";
+
+/// An asset version as the server keeps it: the client's version text with only letters, digits
+/// and ` .#_-` (anything else becomes a space), at most 60 characters. Clients compare with this.
+pub fn asset_version(v: &str) -> String {
+    let s: String = v.chars().map(|c| if c.is_ascii_alphanumeric() || " .#_-".contains(c) { c } else { ' ' }).take(60).collect();
+    s.trim().to_string()
+}
 
 /// Longest validity of a live viewing code (days).
 pub const MAX_CODE_DAYS: u32 = 31;

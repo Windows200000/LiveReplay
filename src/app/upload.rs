@@ -242,6 +242,8 @@ impl Worker {
     }
 
     fn ensure_assets(&mut self, engine: &Engine, map: &str, version: &str) -> Result<(), String> {
+        let version = api::asset_version(version);
+        let version = version.as_str();
         for name in [api::map_asset(map), crate::net::ICONS_ASSET.to_string()] {
             if !self.checked.insert(name.clone()) {
                 continue;
@@ -266,15 +268,14 @@ impl Worker {
                     None => continue,
                 }
             };
-            agent()
-                .put(&url)
-                .query("version", version)
-                .set(api::KEY_HEADER, &self.cfg.upload_key)
-                .send_bytes(&body)
-                .map_err(|e| {
+            match agent().put(&url).query("version", version).set(api::KEY_HEADER, &self.cfg.upload_key).send_bytes(&body) {
+                // Another uploader maintains this asset: theirs stays.
+                Ok(_) | Err(ureq::Error::Status(403, _)) => {}
+                Err(e) => {
                     self.checked.remove(&name);
-                    err(e)
-                })?;
+                    return Err(err(e));
+                }
+            }
         }
         Ok(())
     }
@@ -310,6 +311,7 @@ impl Worker {
                 if info.size > 0 && !info.live && info.replay_size > 0 {
                     remember(&file_name(path), &info.id);
                     let version = super::library::summarize(path, Some(&engine.game)).map(|e| e.version).unwrap_or_default();
+                    let _ = self.ensure_assets(&engine, &battle.map, &version);
                     let _ = self.ensure_3d(&engine, &battle, &version);
                     return Ok(info.id);
                 }
@@ -335,6 +337,8 @@ impl Worker {
     /// Upload the web 3D packs (terrain, map objects for this mode, tanks, map-event prefabs)
     /// the server doesn't have yet for this client version.
     fn ensure_3d(&mut self, engine: &Engine, b: &Battle, version: &str) -> Result<(), String> {
+        let version = api::asset_version(version);
+        let version = version.as_str();
         use crate::gamedata::webpack as wp;
         let Some(cache) = engine.cache3d.as_ref() else { return Ok(()) };
         let gd = &engine.game;
@@ -366,7 +370,11 @@ impl Worker {
             };
             if have.as_deref() != Some(version) {
                 if let Some(body) = make() {
-                    agent().put(&url).query("version", version).set(api::KEY_HEADER, &self.cfg.upload_key).send_bytes(&body).map_err(err)?;
+                    match agent().put(&url).query("version", version).set(api::KEY_HEADER, &self.cfg.upload_key).send_bytes(&body) {
+                        // Another uploader maintains this asset: theirs stays.
+                        Ok(_) | Err(ureq::Error::Status(403, _)) => {}
+                        Err(e) => return Err(err(e)),
+                    }
                 }
             }
             self.checked.insert(name);

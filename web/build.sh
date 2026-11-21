@@ -17,5 +17,5 @@ if command -v wasm-opt >/dev/null; then
     echo "wasm-opt ${v:-?} is too old (needs 125+): not optimising" >&2
   fi
 fi
-cp web/index.html web/favicon.png web-dist/
+cp web/index.html web/main.js web/favicon.png web-dist/
 ls -l web-dist
