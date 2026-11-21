@@ -24,7 +24,7 @@ pub struct Config {
     pub upload_key: String,
     /// Live viewing codes made here (code, expiry in Unix seconds), so they can be shown and revoked.
     pub codes: Vec<(String, u64)>,
-    /// Windows: start with Windows, into the tray.
+    /// Start with the computer, into the tray (on by default).
     pub autostart: bool,
     /// Windows: the window's close button keeps LiveReplay running in the tray.
     pub close_to_tray: bool,
@@ -46,7 +46,7 @@ impl Default for Config {
             upload_asked: false,
             upload_key: String::new(),
             codes: Vec::new(),
-            autostart: false,
+            autostart: true,
             close_to_tray: true,
             update_notify: true,
             auto_update: true,

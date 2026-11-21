@@ -108,22 +108,19 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 
 ### Open
 
-#### Desktop app
-- [ ] Tray, all platforms (user): the window's X keeps LiveReplay in the tray unless turned off in Settings; left click on
-      the tray icon opens the window, right click has only Quit; minimal resources in the tray when no battle is on.
-      Windows: done. macOS and Linux: to do
-- [ ] Start with the computer, into the tray (option, off by default), all platforms. Windows: Startup-folder shortcut
-      (done). macOS (LaunchAgent) and Linux (autostart .desktop): to do
-- [ ] Notice about new releases + self-update replacing the exe, both on by default, both switchable in Settings; an
-      update installed while in the tray restarts by itself when no battle or upload is running. Windows: done (tested
-      with a local fake release). macOS/Linux: to do (notice only until then)
-
-#### Web viewer
-
-#### Server (wot.arne.my)
-Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
+Nothing open.
 
 ### Done
+- macOS and Linux (user: "do it for all platforms"): tray (macOS menu bar; Linux StatusNotifier via D-Bus, no GTK
+  needed): the window's X keeps LiveReplay running, left click on the icon opens the window, its menu has only Quit;
+  start with the computer into the tray (macOS LaunchAgent, Linux XDG autostart); one running copy (a second start
+  shows the first window); self-update from the release's .tar.gz (size + SHA-256 + program type checked, the running
+  file replaced). Wayland can't hide windows: there the X quits. Linux tested for real in WSL (X11): second start
+  hands over, close -> hidden, 0 ms CPU in 15 s, start again -> shown, self-update replaced the program. macOS: builds
+  and passes its tests in CI; not run on a real Mac
+- Start with the computer (into the tray) on by default (user); existing settings keep their choice
+- Uploads without results: until the game's final results arrive, the battle list shows the damage the recording
+  saw; then the battle is sent again with the official final stats (user: "ideally still final stats")
 - Battles that end without results: an upload without results is sent again once the game's results show up (checked
   every minute for 24 h; also works for recordings without header, whose tanks identify the battle); a recording that
   stops growing for 5 minutes (game crash, disconnect) is copied (the game reuses its temp file) and uploaded marked
@@ -154,7 +151,7 @@ Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
   the window, right click has only Quit. In the tray the window is minimised and has no taskbar button, so eframe
   never spins on a window it can't redraw: 0 ms CPU over 15 s. The tray icon has its own thread. Starting LiveReplay
   again while it runs brings the running one to the front (one copy only)
-- Windows: start with Windows, into the tray (setting, off by default): a shortcut in the Startup folder. A registry
+- Windows: start with Windows, into the tray (setting, on by default since the user asked): a shortcut in the Startup folder. A registry
   Run entry made Defender flag the exe (`Trojan:Win32/Bearfoos.A!ml`, a machine-learning false positive); the
   shortcut version scans clean
 - New versions: notice in the app and in the tray tooltip; self-update on Windows (download checked against GitHub's
