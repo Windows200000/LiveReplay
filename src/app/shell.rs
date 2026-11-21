@@ -468,7 +468,7 @@ impl App {
             }
             ui.checkbox(&mut draft.update_notify, "Tell me about new versions");
             if Updater::can_install() {
-                ui.add_enabled(draft.update_notify, egui::Checkbox::new(&mut draft.auto_update, "Install new versions by itself"))
+                ui.add_enabled(draft.update_notify, egui::Checkbox::new(&mut draft.auto_update, "Install new versions automatically"))
                     .on_hover_text("Downloaded from the LiveReplay releases on GitHub and used from the next start");
             }
             ui.label(RichText::new(format!("LiveReplay {}", env!("CARGO_PKG_VERSION"))).small().color(Color32::from_gray(150)));
@@ -478,8 +478,8 @@ impl App {
                 draft.upload_live = false;
                 self.consent = Some(Vec::new());
             }
-            ui.add_enabled(draft.upload_live, egui::Checkbox::new(&mut draft.upload_during_battle, "Already during the battle (live, for viewing codes)"))
-                .on_hover_text("Off: each battle is uploaded when it is over, so nothing uses your connection while you play");
+            ui.add_enabled(draft.upload_live, egui::Checkbox::new(&mut draft.upload_3d_during_battle, "Also the map's 3D data during the battle"))
+                .on_hover_text("Battles are always uploaded live. A map's 3D data (several MB, once per map) is uploaded after the battle unless this is on, so it doesn't use your connection while you play");
             ui.add(egui::Label::new(RichText::new(UPLOAD_NOTICE).small().color(Color32::from_gray(150))).wrap());
             ui.label(RichText::new("Past replays: right-click one in the list > Upload.").color(Color32::from_gray(150)));
             ui.horizontal(|ui| {

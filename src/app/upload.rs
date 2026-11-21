@@ -512,18 +512,6 @@ impl Worker {
                     }
                     return Ok(());
                 }
-                // Only when the battle is over (the default): nothing is sent while it is played.
-                if !self.cfg.upload_during_battle {
-                    if self.current.as_ref().map_or(true, |c| len < c.last_len) {
-                        self.current = Some(LiveUpload { id: None, key: Default::default(), sent_until: 0.0, last_len: len, started: SystemTime::now(), ended: None, changed: Instant::now(), interrupted: false });
-                        set_marker(SystemTime::now());
-                    }
-                    let c = self.current.as_mut().unwrap();
-                    c.last_len = len;
-                    c.changed = Instant::now();
-                    c.ended = None;
-                    return Ok(());
-                }
                 let engine = self.engine()?;
                 let Ok(battle) = Battle::load(&temp, &engine.game, &engine.defs) else { return Ok(()) };
                 let key = (battle.map.clone(), battle.recorder_vehicle.unwrap_or(0));
@@ -537,6 +525,25 @@ impl Worker {
                     let version = entry(&engine, &temp, &battle).map(|e| e.version).unwrap_or_default();
                     self.ensure_assets(&engine, &battle.map, &version)?;
                     self.current.as_mut().unwrap().id = Some(info.id);
+                    // The map's 3D data now, if wanted (heavy: its own thread, live updates go on);
+                    // otherwise after the battle, with the final upload.
+                    if self.cfg.upload_3d_during_battle {
+                        let mut w = Worker {
+                            cfg: self.cfg.clone(),
+                            status: self.status.clone(),
+                            live: self.live.clone(),
+                            checked: HashSet::new(),
+                            current: None,
+                            last_archive: Instant::now(),
+                            pending: Vec::new(),
+                        };
+                        let (engine, battle) = (engine.clone(), battle.clone());
+                        std::thread::spawn(move || {
+                            if let Err(e) = w.ensure_3d(&engine, &battle, &version) {
+                                w.say(format!("3D data upload: {e}"));
+                            }
+                        });
+                    }
                 }
                 let c = self.current.as_mut().unwrap();
                 let from = if c.sent_until > 0.0 { (c.sent_until - LIVE_OVERLAP).max(0.001) } else { 0.0 };

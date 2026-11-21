@@ -14,8 +14,9 @@ pub struct Config {
     pub bottle: String,
     /// Upload the battles played to the LiveReplay server (off unless the user turns it on).
     pub upload_live: bool,
-    /// ...already while they are played (live, for viewing codes); off: when each battle is over.
-    pub upload_during_battle: bool,
+    /// Also the map's 3D data while the battle is played (several MB); off: after the battle.
+    /// (The battle itself is always uploaded live.)
+    pub upload_3d_during_battle: bool,
     /// The user agreed to what uploading means (shown once, before the first upload).
     pub upload_consent: bool,
     /// The first-start question about uploading was answered (either way).
@@ -42,7 +43,7 @@ impl Default for Config {
             replays_dir: String::new(),
             bottle: String::new(),
             upload_live: false,
-            upload_during_battle: false,
+            upload_3d_during_battle: false,
             upload_consent: false,
             upload_asked: false,
             upload_key: String::new(),

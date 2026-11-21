@@ -164,7 +164,10 @@ Nothing open.
   shortcut version scans clean
 - New versions: notice in the app and in the tray tooltip; self-update on Windows (download checked against GitHub's
   size and SHA-256, exe swapped, old one removed at the next start); both on by default, both in Settings
-- Uploads during the battle: a setting, off by default; off = each battle is uploaded when it is over
+- Battles are always uploaded live (when uploading is on). The optional "during the battle" setting (off by default,
+  user) is only for the map's 3D data (several MB, once per map): off = it is uploaded after the battle; on = when the
+  battle starts, on its own thread so live updates go on (tested: 3D data on the server while the battle was live)
+- Settings: "Install new versions automatically" (user's wording)
 - Display settings start collapsed; the website links to the latest release ("Download the app")
 - Security review of the server (independent review + fixes, each checked by an attack test): nothing uploaded is ever run
   or interpreted. Fixed: header injection through the asset version (could have served a page on the site's origin),
