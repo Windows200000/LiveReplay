@@ -63,7 +63,8 @@ pub struct ViewerSettings {
     pub view_3d: bool,
     /// Minimap in the bottom-right corner of the 3D view.
     pub corner_minimap: bool,
-    /// Display settings (rows above the view) open.
+    /// Display settings (rows above the view) open. Always starts collapsed (not saved).
+    #[serde(skip)]
     pub display_open: bool,
 }
 
@@ -76,7 +77,7 @@ impl Default for ViewerSettings {
             speed: 1.0,
             view_3d: false,
             corner_minimap: true,
-            display_open: true,
+            display_open: false,
         }
     }
 }

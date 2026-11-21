@@ -493,6 +493,9 @@ impl WebApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.hyperlink_to("Privacy", "/privacy");
                     ui.hyperlink_to("Licences", "https://github.com/Windows200000/LiveReplay/blob/main/THIRD_PARTY_LICENSES.md");
+                    ui.add_space(8.0);
+                    ui.hyperlink_to(RichText::new("Download the app").strong(), "https://github.com/Windows200000/LiveReplay/releases/latest")
+                        .on_hover_text("LiveReplay for Windows, Linux and macOS: watch your replays and share your battles live");
                 });
             });
             ui.add_space(6.0);

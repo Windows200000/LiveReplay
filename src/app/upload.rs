@@ -391,6 +391,16 @@ impl Worker {
                 if self.current.as_ref().is_some_and(|c| c.last_len == len && c.ended.is_none()) {
                     return Ok(());
                 }
+                // Only when the battle is over (the default): nothing is sent while it is played.
+                if !self.cfg.upload_during_battle {
+                    if self.current.as_ref().map_or(true, |c| len < c.last_len) {
+                        self.current = Some(LiveUpload { id: None, key: Default::default(), sent_until: 0.0, last_len: len, started: SystemTime::now(), ended: None });
+                    }
+                    let c = self.current.as_mut().unwrap();
+                    c.last_len = len;
+                    c.ended = None;
+                    return Ok(());
+                }
                 let engine = self.engine()?;
                 let Ok(battle) = Battle::load(&temp, &engine.game, &engine.defs) else { return Ok(()) };
                 let key = (battle.map.clone(), battle.recorder_vehicle.unwrap_or(0));
@@ -432,11 +442,9 @@ impl Worker {
                     if ended.elapsed() > Duration::from_secs(5) {
                         let id = c.id.clone();
                         self.current = None;
-                        if let Some(id) = id {
-                            self.say("Uploading the finished battle");
-                            self.upload_replay(&p, Some(id))?;
-                            self.say("Battle uploaded");
-                        }
+                        self.say("Uploading the finished battle");
+                        self.upload_replay(&p, id)?;
+                        self.say("Battle uploaded");
                     }
                 } else if ended.elapsed() > FINAL_WAIT {
                     self.finish_previous();

@@ -5,6 +5,7 @@
 //! [--look x,z [--cam yaw,pitch,dist]]` — the viewer options are mainly for testing.
 //! `livereplay --upload <file.wotreplay>...` uploads replays without opening a window and prints
 //! their web links (server: `LIVEREPLAY_SERVER`, default wot.arne.my).
+//! `livereplay --tray` starts in the tray (how Windows starts it, see Settings).
 
 use livereplay::app::shell::App;
 
@@ -31,6 +32,11 @@ fn main() -> eframe::Result {
         }
         return Ok(());
     }
+    let to_tray = args.iter().any(|a| a == "--tray");
+    // A plain start while LiveReplay runs (perhaps in the tray) brings that one to the front.
+    if args.iter().all(|a| a == "--tray") && !livereplay::app::desktop::first_instance() {
+        return Ok(());
+    }
     let options = eframe::NativeOptions {
         depth_buffer: 24,
         viewport: egui::ViewportBuilder::default().with_title("LiveReplay").with_inner_size([1280.0, 860.0])
@@ -41,8 +47,12 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "LiveReplay",
         options,
-        Box::new(move |_cc| {
+        Box::new(move |cc| {
+            livereplay::app::desktop::init(cc);
             let mut app = App::default();
+            if to_tray {
+                app.start_in_tray();
+            }
             if let Some(dir) = arg_after(&args, "--replays") {
                 app.watch_replays_dir(dir);
             }

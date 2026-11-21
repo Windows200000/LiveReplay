@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     /// World of Tanks install folder.
@@ -12,8 +12,10 @@ pub struct Config {
     pub replays_dir: String,
     /// Linux only: Bottles bottle the game runs in (for "Watch in game").
     pub bottle: String,
-    /// Upload the battle being played to the LiveReplay server (off unless the user turns it on).
+    /// Upload the battles played to the LiveReplay server (off unless the user turns it on).
     pub upload_live: bool,
+    /// ...already while they are played (live, for viewing codes); off: when each battle is over.
+    pub upload_during_battle: bool,
     /// The user agreed to what uploading means (shown once, before the first upload).
     pub upload_consent: bool,
     /// The first-start question about uploading was answered (either way).
@@ -22,6 +24,34 @@ pub struct Config {
     pub upload_key: String,
     /// Live viewing codes made here (code, expiry in Unix seconds), so they can be shown and revoked.
     pub codes: Vec<(String, u64)>,
+    /// Windows: start with Windows, into the tray.
+    pub autostart: bool,
+    /// Windows: the window's close button keeps LiveReplay running in the tray.
+    pub close_to_tray: bool,
+    /// Look for new versions and say so.
+    pub update_notify: bool,
+    /// Windows: install new versions by itself (used from the next start).
+    pub auto_update: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            game_dir: String::new(),
+            replays_dir: String::new(),
+            bottle: String::new(),
+            upload_live: false,
+            upload_during_battle: false,
+            upload_consent: false,
+            upload_asked: false,
+            upload_key: String::new(),
+            codes: Vec::new(),
+            autostart: false,
+            close_to_tray: true,
+            update_notify: true,
+            auto_update: true,
+        }
+    }
 }
 
 fn path() -> Option<PathBuf> {

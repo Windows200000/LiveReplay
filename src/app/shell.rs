@@ -8,6 +8,8 @@ use eframe::egui::{self, Color32, RichText};
 use super::config::Config;
 use super::library::{self, ReplayEntry, ScanEvent};
 use super::table::{Action, Table};
+use super::desktop;
+use super::update::{self, Updater};
 use super::upload::{self, Uploader};
 use crate::viewer::player::native::Engine;
 use crate::viewer::player::ReplayViewer;
@@ -46,6 +48,17 @@ pub struct App {
     consent_first: bool,
     /// "Delete all my data" was clicked once (asks again before deleting).
     confirm_delete: bool,
+    /// New versions (background check, download, install).
+    updater: Updater,
+    /// The update notice was closed for this state.
+    update_dismissed: Option<update::State>,
+    /// Last update state shown in the tray tooltip.
+    tray_state: Option<update::State>,
+    /// Go to the tray in the next frame (close button).
+    hide_next: bool,
+    /// Started with `--tray`: go there after this many frames (eframe shows the window itself
+    /// after its first frame, which would undo it).
+    tray_in_frames: u8,
 }
 
 enum CodeOp {
@@ -66,8 +79,22 @@ impl Default for App {
         let cfg = Config::load();
         // First start: ask once whether to upload battles.
         let first_ask = !cfg.upload_asked && !cfg.upload_consent;
+        // The start-up entry follows the exe (it may have moved).
+        if cfg.autostart {
+            let _ = desktop::set_autostart(true);
+        }
+        let uploader = Uploader::start(cfg.clone());
         Self {
-            uploader: Uploader::start(cfg.clone()),
+            updater: {
+                let (temp, status) = (PathBuf::from(&cfg.replays_dir).join("temp.wotreplay"), uploader.status.clone());
+                let idle = move || std::fs::metadata(&temp).map_or(true, |m| m.len() == 0) && status.lock().map_or(false, |s| s.queued == 0);
+                Updater::start(cfg.update_notify, cfg.auto_update && Updater::can_install(), Box::new(idle))
+            },
+            hide_next: false,
+            tray_in_frames: 0,
+            update_dismissed: None,
+            tray_state: None,
+            uploader,
             code_days: 7,
             code_rx: None,
             code_msg: String::new(),
@@ -159,6 +186,11 @@ impl App {
     /// Look for the battle in progress in another folder (`--replays <dir>`, testing; not saved).
     pub fn watch_replays_dir(&mut self, dir: String) {
         self.cfg.replays_dir = dir;
+    }
+
+    /// Go to the tray in the first frame (`--tray`: started with the computer).
+    pub fn start_in_tray(&mut self) {
+        self.tray_in_frames = 3;
     }
 
     /// Open the settings window (`--settings`, testing).
@@ -425,11 +457,26 @@ impl App {
                 }
             });
             ui.add_space(10.0);
+            ui.label(RichText::new("App").strong());
+            if desktop::tray_supported() {
+                ui.checkbox(&mut draft.autostart, "Start with the computer (in the tray)");
+                ui.checkbox(&mut draft.close_to_tray, "Closing the window keeps LiveReplay in the tray")
+                    .on_hover_text(desktop::TRAY_HINT);
+            }
+            ui.checkbox(&mut draft.update_notify, "Tell me about new versions");
+            if Updater::can_install() {
+                ui.add_enabled(draft.update_notify, egui::Checkbox::new(&mut draft.auto_update, "Install new versions by itself"))
+                    .on_hover_text("Downloaded from the LiveReplay releases on GitHub and used from the next start");
+            }
+            ui.label(RichText::new(format!("LiveReplay {}", env!("CARGO_PKG_VERSION"))).small().color(Color32::from_gray(150)));
+            ui.add_space(10.0);
             ui.label(RichText::new("Server (wot.arne.my)").strong());
-            if ui.checkbox(&mut draft.upload_live, "Upload the battles I play, live").changed() && draft.upload_live && !draft.upload_consent {
+            if ui.checkbox(&mut draft.upload_live, "Upload the battles I play").changed() && draft.upload_live && !draft.upload_consent {
                 draft.upload_live = false;
                 self.consent = Some(Vec::new());
             }
+            ui.add_enabled(draft.upload_live, egui::Checkbox::new(&mut draft.upload_during_battle, "Already during the battle (live, for viewing codes)"))
+                .on_hover_text("Off: each battle is uploaded when it is over, so nothing uses your connection while you play");
             ui.add(egui::Label::new(RichText::new(UPLOAD_NOTICE).small().color(Color32::from_gray(150))).wrap());
             ui.label(RichText::new("Past replays: right-click one in the list > Upload.").color(Color32::from_gray(150)));
             ui.horizontal(|ui| {
@@ -527,7 +574,15 @@ impl App {
             save = ui.button("Save").clicked();
         });
         if save {
+            let before = self.cfg.clone();
             self.cfg = self.editing.take().unwrap_or_default();
+            if self.cfg.autostart != before.autostart {
+                if let Err(e) = desktop::set_autostart(self.cfg.autostart) {
+                    self.status = e;
+                    self.cfg.autostart = before.autostart;
+                }
+            }
+            self.updater.set_options(self.cfg.update_notify, self.cfg.auto_update && Updater::can_install());
             self.cfg.save();
             self.uploader.set_config(self.cfg.clone());
             self.rescan();
@@ -537,8 +592,87 @@ impl App {
     }
 }
 
+impl App {
+    /// Update notice above everything (list and viewer); the tray tooltip says it too.
+    fn update_notice(&mut self, ctx: &egui::Context) {
+        let state = self.updater.state();
+        if self.tray_state.as_ref() != Some(&state) {
+            desktop::set_tooltip(&match &state {
+                update::State::Available(v, _) => format!("LiveReplay: version {v} is available"),
+                update::State::Ready(v) => format!("LiveReplay: version {v} installed, used from the next start"),
+                _ => "LiveReplay".to_string(),
+            });
+            self.tray_state = Some(state.clone());
+        }
+        if state == update::State::Idle || self.update_dismissed.as_ref() == Some(&state) {
+            return;
+        }
+        let blue = Color32::from_rgb(90, 160, 255);
+        egui::TopBottomPanel::top("update_notice").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                match &state {
+                    update::State::Available(v, page) => {
+                        ui.label(RichText::new(format!("LiveReplay {v} is available.")).color(blue).strong());
+                        if Updater::can_install() && ui.button("Install").clicked() {
+                            self.updater.install_in_background();
+                        }
+                        ui.hyperlink_to("What is new", page);
+                    }
+                    update::State::Downloading(v) => {
+                        ui.spinner();
+                        ui.label(format!("Downloading LiveReplay {v}..."));
+                    }
+                    update::State::Ready(v) => {
+                        ui.label(RichText::new(format!("LiveReplay {v} is installed.")).color(blue).strong());
+                        if ui.button("Restart now").clicked() {
+                            update::restart(false);
+                        }
+                        ui.label(RichText::new("(or it is used from the next start)").color(Color32::from_gray(150)));
+                    }
+                    update::State::Failed(msg) => {
+                        ui.label(RichText::new(msg).color(Color32::from_rgb(255, 120, 110)));
+                        ui.hyperlink_to("Download page", "https://github.com/Windows200000/LiveReplay/releases/latest");
+                    }
+                    update::State::Idle => {}
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("\u{d7}").on_hover_text("Hide this notice").clicked() {
+                        self.update_dismissed = Some(state.clone());
+                    }
+                });
+            });
+        });
+        if matches!(state, update::State::Downloading(_)) {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
+    }
+}
+
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Close button: into the tray (unless turned off in Settings).
+        if ctx.input(|i| i.viewport().close_requested()) && self.cfg.close_to_tray && desktop::tray_available() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.hide_next = true;
+        }
+        if self.tray_in_frames > 0 {
+            self.tray_in_frames -= 1;
+            self.hide_next = self.tray_in_frames == 0;
+            if !self.hide_next {
+                ctx.request_repaint();
+                return;
+            }
+        }
+        if self.hide_next {
+            self.hide_next = false;
+            desktop::hide(ctx);
+            return;
+        }
+        if desktop::hidden() {
+            // Nothing is drawn and no redraw is asked for: the window costs nothing until shown.
+            return;
+        }
+        self.update_notice(ctx);
         if self.first_frame {
             self.first_frame = false;
             crate::viewer::theme::apply(ctx);

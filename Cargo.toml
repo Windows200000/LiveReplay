@@ -38,6 +38,13 @@ directories = "5"
 ureq = { version = "2", default-features = false, features = ["tls", "json"] }
 getrandom = "0.2"
 
+# Windows: tray icon (close to tray, start with Windows); the window handle to show/hide it.
+[target.'cfg(windows)'.dependencies]
+tray-icon = "0.26"
+# Start with Windows: a shortcut in the Startup folder.
+mslnk = "0.1"
+raw-window-handle = "0.6"
+
 # Web build: viewer settings in localStorage.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-sys = { version = "0.3", features = ["Window", "Storage"] }
