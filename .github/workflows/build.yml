@@ -28,7 +28,7 @@ jobs:
           - { name: macos-arm64, os: macos-15, bin: livereplay }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Linux libraries (egui/winit)
         if: runner.os == 'Linux'
@@ -38,7 +38,7 @@ jobs:
           key: ${{ matrix.name }}
       - run: cargo test --release --lib
       - run: cargo build --release
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: livereplay-${{ matrix.name }}
           path: target/release/${{ matrix.bin }}
@@ -46,7 +46,7 @@ jobs:
   server-and-web:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -57,7 +57,7 @@ jobs:
   docker:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: docker build -t livereplay-server .
 
   publish:
@@ -70,7 +70,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
       - name: "Package: Windows .exe, Linux/macOS .tar.gz (keeps the executable bit)"

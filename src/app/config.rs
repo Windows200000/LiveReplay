@@ -31,7 +31,7 @@ fn path() -> Option<PathBuf> {
 impl Config {
     /// Saved settings, with empty paths filled in from the detected game install.
     pub fn load() -> Self {
-        let mut c: Config = path().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_else(Self::from_old_ini);
+        let mut c: Config = Self::read_saved().unwrap_or_else(Self::from_old_ini);
         if let Some(dir) = crate::gamedata::find_game_dir(&c.game_dir) {
             if c.game_dir.is_empty() {
                 c.game_dir = dir.to_string_lossy().into_owned();
@@ -47,13 +47,35 @@ impl Config {
         c
     }
 
+    /// The saved settings. Several app windows share the file: a read can meet another one's write,
+    /// so failures are retried. A file that stays unreadable is kept aside (`config.json.broken`)
+    /// rather than overwritten, so its upload key isn't lost without notice.
+    fn read_saved() -> Option<Self> {
+        let p = path()?;
+        if !p.exists() {
+            return None;
+        }
+        for _ in 0..20 {
+            if let Some(c) = std::fs::read_to_string(&p).ok().and_then(|s| serde_json::from_str(&s).ok()) {
+                return Some(c);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let _ = std::fs::rename(&p, p.with_extension("json.broken"));
+        None
+    }
+
+    /// Written to a temporary file and renamed over the old one: readers never see half a file.
     pub fn save(&self) {
         let Some(p) = path() else { return };
         if let Some(d) = p.parent() {
             let _ = std::fs::create_dir_all(d);
         }
         if let Ok(s) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(p, s);
+            let tmp = p.with_extension(format!("json.{}.tmp", std::process::id()));
+            if std::fs::write(&tmp, s).is_ok() && std::fs::rename(&tmp, &p).is_err() {
+                let _ = std::fs::remove_file(&tmp);
+            }
         }
     }
 

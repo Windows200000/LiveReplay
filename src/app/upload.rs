@@ -306,7 +306,8 @@ impl Worker {
             Some(id) => id,
             None => {
                 let info = self.new_battle(&engine, path, &battle, false)?;
-                if info.size > 0 && !info.live {
+                // Complete on the server (the original replay is there): only the 3D data may be missing.
+                if info.size > 0 && !info.live && info.replay_size > 0 {
                     remember(&file_name(path), &info.id);
                     let version = super::library::summarize(path, Some(&engine.game)).map(|e| e.version).unwrap_or_default();
                     let _ = self.ensure_3d(&engine, &battle, &version);
@@ -376,9 +377,9 @@ impl Worker {
     fn live_tick(&mut self) -> Result<(), String> {
         let dir = PathBuf::from(&self.cfg.replays_dir);
         let temp = dir.join("temp.wotreplay");
-        match std::fs::metadata(&temp) {
-            Ok(meta) => {
-                let len = meta.len();
+        // After a battle the game leaves the file in place, empty: that counts as no battle.
+        match std::fs::metadata(&temp).ok().map(|m| m.len()).filter(|&l| l > 0) {
+            Some(len) => {
                 if self.current.as_ref().is_some_and(|c| c.last_len == len && c.ended.is_none()) {
                     return Ok(());
                 }
@@ -404,7 +405,7 @@ impl Worker {
                 c.ended = None;
                 self.say(format!("Live battle on {} is being uploaded", battle.map_display));
             }
-            Err(_) => {
+            None => {
                 let Some(c) = self.current.as_mut() else { return Ok(()) };
                 let ended = *c.ended.get_or_insert_with(Instant::now);
                 // The game writes the replay under its final name when the battle is left.

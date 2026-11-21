@@ -77,7 +77,8 @@ stores and serves it, and the web viewer (the same viewer compiled to WebAssembl
   no tracking. Uploaders consent in the app before the first upload and can download (`GET /api/me`) or delete
   (`DELETE /api/me`, `DELETE /api/battles/<id>`) their data from Settings. Removal request from a player who didn't upload:
   `curl -X DELETE -H "X-Livereplay-Admin: $ADMIN_TOKEN" https://<domain>/api/admin/players/<player name>` deletes every
-  battle with that name (answer within one month).
+  battle with that name (answer within one month) and frees the name, so the next uploader of it claims it (also the fix
+  when "this player name belongs to another uploader" is wrong, e.g. after a lost upload key).
 * API: see `api/src/lib.rs`.
 * Nothing from the game is part of the server or image. The minimap pictures, map layouts and icons the web viewer needs are
   uploaded by the desktop app from the player's own game files.
@@ -108,6 +109,13 @@ Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
       Until then uploads from the app fail with a network error (uploading is off by default)
 
 ### Done
+- Live uploads end properly: the game leaves an empty `temp.wotreplay` after a battle, which now counts as "no battle", so
+  the finished replay, its original file and the 3D packs are uploaded (3D was missing on the server: 404s)
+- Server: a finished replay that belongs to the uploader's live entry (same player and map, within 10 min) completes that
+  entry instead of making a second one; the admin player delete also frees the name
+- Settings file written atomically and re-read on failure; an unreadable one is set aside, never overwritten (a failed
+  read could make a new upload key: "this player name belongs to another uploader")
+- CI actions on current versions (checkout v7, upload-artifact v7, download-artifact v8)
 - No compiler warnings (desktop, examples, web): float literals typed for the coming f32-fallback error; web-only
   dependencies only in the wasm build. Docker uses the prebuilt wasm-bindgen instead of compiling wasm-bindgen-cli
   (which pulled in buf_redux / multipart, rejected by future Rust)

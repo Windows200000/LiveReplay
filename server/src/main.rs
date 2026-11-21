@@ -47,6 +47,20 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// A battle date as the game writes it ("dd.mm.yyyy hh:mm:ss", the player's local time) in
+/// seconds, for comparing two dates.
+fn date_secs(d: &str) -> Option<i64> {
+    let n: Vec<i64> = d.split(|c: char| !c.is_ascii_digit()).filter(|s| !s.is_empty()).map(|s| s.parse().ok()).collect::<Option<_>>()?;
+    let [day, m, y, h, mi, s] = n[..] else { return None };
+    // Days since 1970-01-01 (Howard Hinnant's days_from_civil).
+    let y = y - i64::from(m <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some((era * 146_097 + doe - 719_468) * 86400 + h * 3600 + mi * 60 + s)
+}
+
 fn sha_hex(b: &[u8]) -> String {
     sha2::Sha256::digest(b).iter().map(|x| format!("{x:02x}")).collect()
 }
@@ -381,6 +395,9 @@ fn route(app: &App, rq: &mut Request) -> Reply {
             for id in &ids {
                 app.remove_battle(&mut st, id);
             }
+            // The name is free again: the next uploader of it claims it.
+            st.claims.retain(|claim, _| claim.split_once(':').map_or(true, |(_, p)| p.to_lowercase() != name));
+            write_json(&app.data.join("claims.json"), &st.claims);
             Reply::json(&ids)
         }
         (Method::Get, ["api", "battles"]) => list(app, q),
@@ -555,6 +572,24 @@ fn new_battle(app: &App, rq: &mut Request) -> Reply {
     // A finished replay uploaded again: same battle entry.
     if !nb.live && !nb.file_name.is_empty() {
         if let Some(s) = st.battles.values().find(|s| s.owner == owner && s.info.file_name == nb.file_name && s.info.player == nb.player) {
+            return Reply::json(&s.info);
+        }
+        // The finished replay of this uploader's live upload (live entries have no file name; their
+        // date is when the game started writing, a few minutes before the replay's own): that entry.
+        let at = date_secs(&nb.date);
+        let live = st
+            .battles
+            .values()
+            .filter(|s| s.owner == owner && s.info.file_name.is_empty() && s.info.player == nb.player && s.info.map == nb.map)
+            .filter_map(|s| Some((s.info.id.clone(), (date_secs(&s.info.date)? - at?).abs())))
+            .filter(|(_, d)| *d <= 600)
+            .min_by_key(|(_, d)| *d)
+            .map(|(id, _)| id);
+        if let Some(id) = live {
+            let s = st.battles.get_mut(&id).unwrap();
+            s.info.file_name = nb.file_name.clone();
+            let s = s.clone();
+            app.save_battle(&s);
             return Reply::json(&s.info);
         }
     }
@@ -811,6 +846,10 @@ mod tests {
         assert!(whole_frames(&[2, 0, 0, 0, 9, 9, 1, 0, 0, 0, 5]));
         assert!(!whole_frames(&[2, 0, 0, 0, 9]));
         assert_eq!(url_decode("a%20b+c"), "a b c");
+        assert_eq!(date_secs("01.01.1970 00:00:00"), Some(0));
+        assert_eq!(date_secs("21.11.2026 01:43:04").zip(date_secs("21.11.2026 01:41:26")).map(|(a, b)| a - b), Some(98));
+        assert_eq!(date_secs("01.03.2024 00:00:00").zip(date_secs("29.02.2024 23:59:59")).map(|(a, b)| a - b), Some(1));
+        assert_eq!(date_secs("21.11.2026"), None);
         assert!(version_key("1.31.0.2") > version_key("1.30.1"));
         assert_eq!(token(10).len(), 10);
     }

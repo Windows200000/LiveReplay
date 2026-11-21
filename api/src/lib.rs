@@ -19,6 +19,7 @@
 //! - `GET /api/me` K -> [`MyData`];  `DELETE /api/me` K: delete everything of this uploader;
 //!   `DELETE /api/battles/{id}` K: delete one battle (GDPR access / erasure)
 //! - `DELETE /api/admin/players/{name}` with [`ADMIN_HEADER`]: remove every battle a player is in
+//!   and free the name for the next uploader
 //!   (removal requests from players who didn't upload)
 //! - `GET /privacy`: privacy policy
 //! - `GET /api/assets/{name}` / `PUT /api/assets/{name}?version=V` K: game data the web viewer
