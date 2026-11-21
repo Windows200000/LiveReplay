@@ -111,6 +111,8 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 Nothing open.
 
 ### Done
+- Settings save themselves, always (user): every change takes effect and is saved at once; folder fields when they are
+  left (not a rescan per key press), also when the window is closed while typing. No Save button
 - Builds outside Docker (user's server): `web/build.sh` fetches the right tools itself on Linux, once, into
   `target/tools`: the prebuilt wasm-bindgen matching Cargo.lock (no `cargo install wasm-bindgen-cli`, so no buf_redux /
   multipart warning) and binaryen 125 checked against pinned checksums (the distro's wasm-opt 108 was too old, so the

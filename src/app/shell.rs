@@ -441,18 +441,19 @@ impl App {
     fn settings_window(&mut self, ctx: &egui::Context) {
         let Some(draft) = &mut self.editing else { return };
         let mut open = true;
-        let mut save = false;
+        // A folder field is applied when it is left (not at every key press: a rescan each time).
+        let mut typing = false;
         egui::Window::new("Settings").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
             egui::Grid::new("settings_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                 ui.label("Game folder");
-                ui.add(egui::TextEdit::singleline(&mut draft.game_dir).desired_width(380.0));
+                typing |= ui.add(egui::TextEdit::singleline(&mut draft.game_dir).desired_width(380.0)).has_focus();
                 ui.end_row();
                 ui.label("Replays folder");
-                ui.add(egui::TextEdit::singleline(&mut draft.replays_dir).desired_width(380.0));
+                typing |= ui.add(egui::TextEdit::singleline(&mut draft.replays_dir).desired_width(380.0)).has_focus();
                 ui.end_row();
                 if !cfg!(windows) {
                     ui.label("Bottles bottle");
-                    ui.add(egui::TextEdit::singleline(&mut draft.bottle).desired_width(380.0));
+                    typing |= ui.add(egui::TextEdit::singleline(&mut draft.bottle).desired_width(380.0)).has_focus();
                     ui.end_row();
                 }
             });
@@ -566,31 +567,46 @@ impl App {
                     Ok(CodeOp::Done(msg)) => self.code_msg = msg,
                     Err(e) => self.code_msg = e,
                 }
-                // Codes are kept right away, also without "Save".
+                // Codes are kept right away.
                 self.cfg.codes = draft.codes.clone();
                 self.cfg.save();
             }
             if self.code_rx.is_some() {
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
             }
-            ui.add_space(6.0);
-            save = ui.button("Save").clicked();
+            ui.add_space(4.0);
+            ui.label(RichText::new("Changes are saved right away.").small().color(Color32::from_gray(150)));
         });
-        if save {
-            let before = self.cfg.clone();
-            self.cfg = self.editing.take().unwrap_or_default();
-            if self.cfg.autostart != before.autostart {
-                if let Err(e) = desktop::set_autostart(self.cfg.autostart) {
-                    self.status = e;
-                    self.cfg.autostart = before.autostart;
+        // Every change takes effect and is saved at once (also when the window is closed while
+        // a folder field is still being edited).
+        let changed = self.editing.as_ref().is_some_and(|d| *d != self.cfg);
+        if changed && (!typing || !open) {
+            let new = self.editing.clone().unwrap_or_default();
+            self.apply_settings(new);
+        }
+        if !open {
+            self.editing = None;
+        }
+    }
+
+    /// Take over changed settings: start-up entry, updates, uploader, saved file; the replay
+    /// list is read again when a folder changed.
+    fn apply_settings(&mut self, new: Config) {
+        let before = std::mem::replace(&mut self.cfg, new);
+        if self.cfg.autostart != before.autostart {
+            if let Err(e) = desktop::set_autostart(self.cfg.autostart) {
+                self.status = e;
+                self.cfg.autostart = before.autostart;
+                if let Some(d) = &mut self.editing {
+                    d.autostart = before.autostart;
                 }
             }
-            self.updater.set_options(self.cfg.update_notify, self.cfg.auto_update && Updater::can_install());
-            self.cfg.save();
-            self.uploader.set_config(self.cfg.clone());
+        }
+        self.updater.set_options(self.cfg.update_notify, self.cfg.auto_update && Updater::can_install());
+        self.cfg.save();
+        self.uploader.set_config(self.cfg.clone());
+        if self.cfg.replays_dir != before.replays_dir || self.cfg.game_dir != before.game_dir {
             self.rescan();
-        } else if !open {
-            self.editing = None;
         }
     }
 }
