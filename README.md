@@ -108,14 +108,43 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 
 ### Open
 
-#### Viewer
+#### Desktop app
+- [ ] Tray, all platforms (user): the window's X keeps LiveReplay in the tray unless turned off in Settings; left click on
+      the tray icon opens the window, right click has only Quit; minimal resources in the tray when no battle is on.
+      Windows: built and tested (0 ms CPU in the tray; second start brings the window back), not committed yet.
+      macOS and Linux: to do
+- [ ] Start with the computer, into the tray (option, off by default), all platforms. Windows: Startup-folder shortcut
+      (the registry Run entry made Defender flag the exe as `Trojan:Win32/Bearfoos.A!ml`), built, not committed.
+      macOS (LaunchAgent) and Linux (autostart .desktop): to do
+- [ ] Notice about new releases + self-update replacing the exe, both on by default, both switchable in Settings; an
+      update installed while in the tray restarts by itself when no battle or upload is running. Windows: built
+      (download checked against GitHub's size + SHA-256), not yet tested against a real newer release. macOS/Linux: to do
+- [ ] Uploads during the battle: a setting, off by default; off = each battle is uploaded when it is over. Built, not committed
+- [ ] Battles that end without results (left early: upload now, re-send when the game's results arrive; game crash or
+      disconnect: keep a copy of `temp.wotreplay` and upload it as interrupted) — proposal, waiting for the user's OK
+- [ ] Defender false positive: keep away from malware-like patterns (done: no registry Run entry); a code-signing
+      certificate or a false-positive report to Microsoft would settle it for good
 
-Nothing open.
+#### Viewer
+- [ ] Display settings start collapsed (built, not committed)
+
+#### Web viewer
+- [ ] Link to the latest GitHub release on the website (built, not committed)
+- [ ] 3D data missing on the server: a popup, and the view switches back to 2D. When the data is being uploaded right
+      now: show how much of it is there (percent) and switch to 3D when it is complete, unless the user went back to 2D
+- [ ] Identify identical battles (user): the same battle uploaded by several players, or several times by one player,
+      must be recognised. User's suggestion: same players at the same second (nobody can be in a battle twice). Plan: the
+      game's `arenaUniqueID` (the same for every player in that battle, in every replay), with "same players + same
+      start time" as the fallback for older uploads
+- [ ] Multi-POV (user): with identical battles known, merge every uploader's viewpoint into one battle; this must also
+      work during a live battle already
+- [ ] That battle appears once in the website's lists (live and finished), with the names of all its uploaders
 
 #### Server (wot.arne.my)
 Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
-- [ ] Deploy to wot.arne.my (`docker compose up -d --build` on a host with Docker; DNS to that host) — needs the user's server.
-      Until then uploads from the app fail with a network error (uploading is off by default)
+- [ ] Live battles never left the live list (30-minute timeout, and every app restart made a new entry): an entry stops
+      being live 90 s after its last update; the same uploader sending the same battle again continues its entry
+- [ ] Clean up the duplicate test entries on wot.arne.my (admin delete of the player, after the next deploy)
 
 ### Done
 - Security review of the server (independent review + fixes, each checked by an attack test): nothing uploaded is ever run
