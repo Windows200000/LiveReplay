@@ -439,7 +439,7 @@ impl BattleView for Minimap2D {
             for i in 0..=12 {
                 cone.push(p + dir(yaw - half + 2.0 * half * i as f32 / 12.0));
             }
-            map_painter.add(Shape::convex_polygon(cone, Color32::from_white_alpha(38), Stroke::new(1.0, Color32::from_white_alpha(90))));
+            map_painter.add(Shape::convex_polygon(cone, Color32::from_white_alpha(38), Stroke::new(1.0_f32, Color32::from_white_alpha(90))));
             map_painter.circle_filled(p, (4.0 * k).max(3.0), Color32::from_white_alpha(170));
         }
 

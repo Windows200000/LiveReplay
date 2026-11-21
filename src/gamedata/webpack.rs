@@ -92,7 +92,7 @@ pub fn encode_mesh(m: &Mesh) -> Vec<u8> {
 
 pub fn decode_mesh(b: &[u8]) -> Option<Mesh> {
     let mut at = 0;
-    let mut n = |at: &mut usize| get_varint(b, at).map(|v| v.max(0) as usize);
+    let n = |at: &mut usize| get_varint(b, at).map(|v| v.max(0) as usize);
     let np = n(&mut at)?;
     let mut prev = [0i64; 3];
     let mut positions = Vec::with_capacity(np.min(1 << 24));

@@ -32,10 +32,10 @@ pub fn apply(ctx: &egui::Context) {
     v.faint_bg_color = Color32::from_rgb(23, 27, 35);
     v.window_rounding = Rounding::same(10.0);
     v.menu_rounding = Rounding::same(8.0);
-    v.window_stroke = Stroke::new(1.0, BORDER);
+    v.window_stroke = Stroke::new(1.0_f32, BORDER);
     v.override_text_color = Some(TEXT);
     v.selection.bg_fill = ACCENT.gamma_multiply(0.35);
-    v.selection.stroke = Stroke::new(1.0, ACCENT);
+    v.selection.stroke = Stroke::new(1.0_f32, ACCENT);
     v.hyperlink_color = ACCENT;
     for (w, fill) in [
         (&mut v.widgets.noninteractive, PANEL),
@@ -47,12 +47,12 @@ pub fn apply(ctx: &egui::Context) {
         w.rounding = Rounding::same(6.0);
         w.bg_fill = fill;
         w.weak_bg_fill = fill;
-        w.bg_stroke = Stroke::new(1.0, BORDER);
+        w.bg_stroke = Stroke::new(1.0_f32, BORDER);
     }
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, BORDER);
     // Slider rails / checkbox boxes use this; lighter than the cards so they stay visible.
     v.widgets.inactive.bg_fill = Color32::from_rgb(56, 64, 78);
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, ACCENT.gamma_multiply(0.6));
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, ACCENT.gamma_multiply(0.6));
     style.spacing.item_spacing = Vec2::new(8.0, 6.0);
     style.spacing.button_padding = Vec2::new(10.0, 5.0);
     style.spacing.window_margin = egui::Margin::same(12.0);
@@ -61,7 +61,7 @@ pub fn apply(ctx: &egui::Context) {
 
 /// A card frame for grouped content.
 pub fn card() -> egui::Frame {
-    egui::Frame::none().fill(CARD).rounding(Rounding::same(10.0)).stroke(Stroke::new(1.0, BORDER)).inner_margin(egui::Margin::same(10.0))
+    egui::Frame::none().fill(CARD).rounding(Rounding::same(10.0)).stroke(Stroke::new(1.0_f32, BORDER)).inner_margin(egui::Margin::same(10.0))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

@@ -108,6 +108,9 @@ Priorities: 1) minimise traffic, 2) minimise server-side resource usage.
       Until then uploads from the app fail with a network error (uploading is off by default)
 
 ### Done
+- No compiler warnings (desktop, examples, web): float literals typed for the coming f32-fallback error; web-only
+  dependencies only in the wasm build. Docker uses the prebuilt wasm-bindgen instead of compiling wasm-bindgen-cli
+  (which pulled in buf_redux / multipart, rejected by future Rust)
 - Web viewer stuck on loading in every browser (TypeError in `__wbindgen_init_externref_table`): the Docker image's
   Debian binaryen 111 pointed the externref table export at the function table; now binaryen 125 from its releases,
   and `web/build.sh` skips wasm-opt older than 125

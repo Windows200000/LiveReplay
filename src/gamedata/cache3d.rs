@@ -14,6 +14,7 @@ use super::models::{parse_chunk_heights, parse_primitives, parse_sections, Mesh}
 use super::pkg::Pkg;
 use super::GameData;
 
+#[cfg(not(target_arch = "wasm32"))]
 const FORMAT: u32 = 19;
 /// Keep every 4th height sample: 65 samples / 100 m -> 17 samples (6.25 m spacing).
 const TERRAIN_STEP: usize = 4;

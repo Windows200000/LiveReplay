@@ -233,7 +233,7 @@ impl Table {
                         if hovered && pointer.map(|pt| cr.contains(pt)).unwrap_or(false) {
                             hovered_col = Some(c);
                             p.rect_filled(cr.shrink(1.0), 4.0, Color32::from_white_alpha(14));
-                            p.rect_stroke(cr.shrink(1.0), 4.0, Stroke::new(1.0, theme::ACCENT.gamma_multiply(0.5)));
+                            p.rect_stroke(cr.shrink(1.0), 4.0, Stroke::new(1.0_f32, theme::ACCENT.gamma_multiply(0.5)));
                         }
                         let text = cell(info, c);
                         let galley = p.layout_no_wrap(text, egui::FontId::proportional(13.5), if is_sel { theme::TEXT } else { Color32::from_gray(205) });
@@ -367,10 +367,10 @@ impl Table {
         let to_v = |x: f32| (((x - rect.left() - 8.0) / (rect.width() - 16.0)).clamp(0.0, 1.0) * max_dmg as f32).round() as i64;
         let p = ui.painter();
         let y = rect.center().y;
-        p.line_segment([Pos2::new(rect.left() + 8.0, y), Pos2::new(rect.right() - 8.0, y)], Stroke::new(4.0, theme::BG));
-        p.line_segment([Pos2::new(to_x(lo), y), Pos2::new(to_x(hi), y)], Stroke::new(4.0, theme::ACCENT));
+        p.line_segment([Pos2::new(rect.left() + 8.0, y), Pos2::new(rect.right() - 8.0, y)], Stroke::new(4.0_f32, theme::BG));
+        p.line_segment([Pos2::new(to_x(lo), y), Pos2::new(to_x(hi), y)], Stroke::new(4.0_f32, theme::ACCENT));
         for v in [lo, hi] {
-            p.circle(Pos2::new(to_x(v), y), 7.0, theme::TEXT, Stroke::new(2.0, theme::ACCENT));
+            p.circle(Pos2::new(to_x(v), y), 7.0, theme::TEXT, Stroke::new(2.0_f32, theme::ACCENT));
         }
         if let Some(pt) = resp.interact_pointer_pos() {
             if resp.dragged() || resp.clicked() {

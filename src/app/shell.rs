@@ -303,7 +303,7 @@ impl App {
                 let text = format!("LIVE   {}   {}   {}   {}   in progress", e.player_name, e.tank, e.map, e.mode);
                 let b = egui::Button::new(RichText::new(text).color(Color32::WHITE).strong())
                     .fill(red.gamma_multiply(0.35))
-                    .stroke(egui::Stroke::new(1.0, red))
+                    .stroke(egui::Stroke::new(1.0_f32, red))
                     .min_size(egui::vec2(ui.available_width(), 30.0));
                 watch_live = ui.add(b).on_hover_text("Watch the battle you are playing right now").clicked();
                 ui.add_space(2.0);

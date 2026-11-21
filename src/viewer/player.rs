@@ -127,7 +127,7 @@ fn capture_bar(painter: &egui::Painter, top: egui::Rect, captures: &[scene::Capt
         let body = egui::Rect::from_center_size(tc + egui::vec2(0.0, 2.0), egui::vec2(16.0, 6.0));
         painter.rect_filled(body, 2.0, Color32::WHITE);
         painter.rect_filled(egui::Rect::from_center_size(tc + egui::vec2(-1.0, -3.0), egui::vec2(8.0, 4.0)), 1.5, Color32::WHITE);
-        painter.line_segment([tc + egui::vec2(2.0, -3.0), tc + egui::vec2(10.0, -4.0)], egui::Stroke::new(1.5, Color32::WHITE));
+        painter.line_segment([tc + egui::vec2(2.0, -3.0), tc + egui::vec2(10.0, -4.0)], egui::Stroke::new(1.5_f32, Color32::WHITE));
         let font = egui::FontId::proportional(13.5);
         painter.text(egui::pos2(r.left() + 30.0, r.center().y), egui::Align2::LEFT_CENTER, c.invaders.to_string(), font.clone(), Color32::WHITE);
         // middle
@@ -141,9 +141,9 @@ fn capture_bar(painter: &egui::Painter, top: egui::Rect, captures: &[scene::Capt
         // right: clock + time left
         if c.time_left > 0 && !c.blocked {
             let cc = egui::pos2(r.right() - 58.0, r.center().y);
-            painter.circle_stroke(cc, 6.0, egui::Stroke::new(1.4, Color32::WHITE));
-            painter.line_segment([cc, cc + egui::vec2(0.0, -4.0)], egui::Stroke::new(1.3, Color32::WHITE));
-            painter.line_segment([cc, cc + egui::vec2(3.0, 0.0)], egui::Stroke::new(1.3, Color32::WHITE));
+            painter.circle_stroke(cc, 6.0, egui::Stroke::new(1.4_f32, Color32::WHITE));
+            painter.line_segment([cc, cc + egui::vec2(0.0, -4.0)], egui::Stroke::new(1.3_f32, Color32::WHITE));
+            painter.line_segment([cc, cc + egui::vec2(3.0, 0.0)], egui::Stroke::new(1.3_f32, Color32::WHITE));
             painter.text(
                 egui::pos2(r.right() - 8.0, r.center().y),
                 egui::Align2::RIGHT_CENTER,
