@@ -138,7 +138,8 @@ Nothing open.
 - Releases from CI (user): a push to main whose Cargo.toml version has no release yet creates the tag `v<version>`
   and the release with all six builds (so a release is: raise the version, push to main)
 - Button symbols monochrome again, as before the egui 0.37 upgrade (it made the monochrome emoji fonts optional, so
-  "⬅ ▶ ⏸ ⏮" came out as colour emoji): egui's `monochrome_emoji_fonts` turned on
+  "⬅ ▶ ⏸ ⏮" came out as colour emoji): egui's `monochrome_emoji_fonts` turned on; the website no longer lets the
+  browser draw missing symbols (always in colour), so no colour emoji at all (user)
 - Release 1.1.0 (user): everything below since 1.0.0 (security work, dependency upgrades, smooth live playback,
   self-updating lists, damage stats); installed apps update themselves to it
 - Damage stats next to each team's HP bar (user): dealt, blocked (shells that hit without damage: bounced or not

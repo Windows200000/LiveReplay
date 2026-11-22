@@ -270,6 +270,9 @@ pub struct WebApp {
 
 impl WebApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // No colour emoji: eframe lets the browser draw symbols egui's fonts lack (in colour);
+        // egui's own monochrome emoji fonts cover ours, anything else gets egui's placeholder.
+        cc.egui_ctx.set_glyph_rasterizers(Vec::new());
         livereplay::viewer::theme::apply(&cc.egui_ctx);
         livereplay::viewer::player::apply_ui_scale(&cc.egui_ctx, livereplay::viewer::settings::ViewerSettings::load().ui_scale);
         let (tx, rx) = channel();
