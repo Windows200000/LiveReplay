@@ -126,8 +126,9 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 - Nothing from World of Tanks (textures, models, icons, defs) is ever committed — everything is read from the user's own client at runtime.
 - Keep it lean: no whole other repos; only inspiration or licence-compatible snippets, credited in the README.
 - After every new build, launch the new exe for the user (keep the current build running).
-- Every push to main publishes all six desktop builds to the rolling pre-release `latest-build` (CI `publish` job;
-  https://github.com/Windows200000/LiveReplay/releases/tag/latest-build). A `v*` tag makes a versioned release.
+- Every push to main is a release (CI `publish` job): `Cargo.toml` sets major.minor, CI counts the last number up
+  (one more than the newest `v<major.minor>.x` release) and builds the apps with that version, so their self-update
+  finds it; the rolling pre-release `latest-build` is updated too.
 - Finish the client before the server.
 - Keep this roadmap (in README.md) complete and current at all times, with every request the user made in the session (also those from before context compaction); work through it without stopping until done.
 
@@ -136,6 +137,8 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 Nothing open.
 
 ### Done
+- Every merge is a release (user): major.minor in `Cargo.toml`, the last number counted up by CI per push to main
+  (1.1.1, 1.1.2, ...; a new minor starts at .0); one run on main at a time so two pushes never share a version
 - Team sharing can't be faked with a new install (user): a teammate's upload only opens other viewpoints if that
   player name was registered before the viewpoint's upload began, so an enemy registering mid-battle as a teammate
   who never used the app sees only their own upload (tested)

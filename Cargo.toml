@@ -4,6 +4,8 @@ resolver = "2"
 
 [package]
 name = "livereplay"
+# Major.minor are set here; the last number is counted up by CI for every push to main (each one
+# is a release, see .github/workflows/build.yml).
 version = "1.1.0"
 edition = "2021"
 description = "World of Tanks replay viewer: in-game style 2D minimap and simplified 3D, live battles, replay library"

@@ -1,22 +1,47 @@
 # Builds the desktop app for Windows, Linux and macOS (x64 + arm64), checks the server and web
 # viewer, and builds the Docker image. Artifacts: one desktop binary per platform.
-# Publishing: every push to main replaces the files of the `latest-build` pre-release. When the
-# version in Cargo.toml has no release yet, that push also creates the tag `v<version>` and the
-# release (so a release is: raise the version, push to main). Pushing a `v*` tag by hand works too.
+# Publishing: every push to main is a release. Cargo.toml sets the first two numbers of the
+# version (major.minor); the last one is counted up here: one more than the newest v<major.minor>.x
+# release (none yet: 0). The apps are built with that version, so their self-update sees it. The
+# `latest-build` pre-release is updated too.
 name: build
 
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
 
+# One run on main at a time, so two pushes never get the same version.
+concurrency:
+  group: ${{ github.ref == 'refs/heads/main' && 'main' || github.run_id }}
+  cancel-in-progress: false
+
 jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: Cargo.toml
+          sparse-checkout-cone-mode: false
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          base=$(sed -n '/^\[package\]/,/^\[/s/^version = "\([0-9]*\.[0-9]*\)\..*"/\1/p' Cargo.toml | head -1)
+          last=$(git ls-remote --tags "https://github.com/${{ github.repository }}" "refs/tags/v$base.*" | sed -n "s|.*refs/tags/v$base\.\([0-9]*\)$|\1|p" | sort -n | tail -1)
+          version="$base.$(( ${last:--1} + 1 ))"
+          echo "version $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
   desktop:
+    needs: version
     strategy:
       fail-fast: false
       matrix:
@@ -37,6 +62,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.name }}
+      - name: Version ${{ needs.version.outputs.version }}
+        shell: bash
+        run: sed -i.bak '/^\[package\]/,/^\[/s/^version = ".*"/version = "${{ needs.version.outputs.version }}"/' Cargo.toml && rm Cargo.toml.bak && grep -m1 '^version' Cargo.toml
       - run: cargo test --release --lib
       - run: cargo build --release
       - uses: actions/upload-artifact@v7
@@ -66,7 +94,7 @@ jobs:
         run: docker compose config -q
 
   publish:
-    needs: [desktop, server-and-web, docker]
+    needs: [version, desktop, server-and-web, docker]
     if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     permissions:
@@ -75,10 +103,6 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
-      - uses: actions/checkout@v7
-        with:
-          sparse-checkout: Cargo.toml
-          sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
@@ -102,19 +126,9 @@ jobs:
           gh api -X PATCH "repos/$GH_REPO/git/refs/tags/latest-build" -f sha="$GITHUB_SHA" -F force=true
           gh release upload latest-build dist/* --clobber
           gh release edit latest-build --prerelease --title "Latest build" --notes "Latest build of LiveReplay, commit $short. Replaced with every push to main. Windows: .exe; Linux and macOS: .tar.gz (the app inside is unsigned — on macOS right-click → Open the first time). Third-party licences: THIRD_PARTY_LICENSES.md."
-      - name: Versioned release
-        if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
+      - name: Release v${{ needs.version.outputs.version }}
+        if: github.ref == 'refs/heads/main'
         run: |
-          if [ "${GITHUB_REF#refs/tags/}" != "$GITHUB_REF" ]; then
-            tag="$GITHUB_REF_NAME"
-          else
-            # The app's version (the [package] of the root Cargo.toml).
-            version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-            tag="v$version"
-            if [ -z "$version" ] || gh release view "$tag" > /dev/null 2>&1; then
-              echo "release $tag exists already: nothing to publish"
-              exit 0
-            fi
-          fi
-          # Creates the tag at this commit when it doesn't exist yet.
-          gh release create "$tag" dist/* --target "$GITHUB_SHA" --title "LiveReplay ${tag#v}" --notes "LiveReplay ${tag#v}. Windows: .exe; Linux and macOS: .tar.gz (the app inside is unsigned — on macOS right-click → Open the first time). Third-party licences: THIRD_PARTY_LICENSES.md." --latest
+          tag="v${{ needs.version.outputs.version }}"
+          # Creates the tag at this commit.
+          gh release create "$tag" dist/* --target "$GITHUB_SHA" --title "LiveReplay ${tag#v}" --notes "LiveReplay ${tag#v} (commit ${GITHUB_SHA::7}). Windows: .exe; Linux and macOS: .tar.gz (the app inside is unsigned — on macOS right-click → Open the first time). Third-party licences: THIRD_PARTY_LICENSES.md." --latest
