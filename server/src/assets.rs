@@ -13,7 +13,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Copies kept per asset (the served one and the candidates).
-pub const MAX_COPIES: usize = 3;
+pub const MAX_COPIES: usize = 4;
 /// A vote counts for this long (votes are renewed whenever an app uploads for a new game version).
 pub const VOTE_SECS: u64 = 120 * 86400;
 
@@ -47,6 +47,9 @@ pub struct AssetMeta {
     pub current: Copy,
     #[serde(default)]
     pub others: Vec<Copy>,
+    /// The operator chose the served copy: votes are still recorded but change nothing.
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 impl AssetMeta {
@@ -73,6 +76,9 @@ impl AssetMeta {
 
     /// A candidate with more votes than the served copy (strictly: ties keep what is served).
     pub fn leader(&self) -> Option<usize> {
+        if self.pinned {
+            return None;
+        }
         let (i, best) = self.others.iter().enumerate().max_by_key(|(_, c)| c.votes.len())?;
         (best.votes.len() > self.current.votes.len()).then_some(i)
     }
@@ -116,9 +122,9 @@ impl AssetMeta {
     }
 }
 
-/// File name part of a candidate copy.
+/// File name of a candidate copy (the whole hash: copies can't be made to share a file).
 pub fn candidate_file(name: &str, hash: &str) -> String {
-    format!("{name}.{}.bin", &hash[..hash.len().min(16)])
+    format!("{name}.{hash}.bin")
 }
 
 pub fn valid_hash(h: &str) -> bool {
@@ -136,7 +142,7 @@ mod tests {
     #[test]
     fn votes() {
         // The first copy is served; garbage first, then the real data from two players.
-        let mut m = AssetMeta { current: copy("bad"), others: vec![copy("good")] };
+        let mut m = AssetMeta { current: copy("bad"), others: vec![copy("good")], pinned: false };
         assert_eq!(m.vote("attacker", "bad", 100), None);
         assert_eq!(m.vote("p1", "good", 100), None); // 1:1, ties keep what is served
         assert_eq!(m.vote("p2", "good", 100), Some(0));
@@ -158,16 +164,25 @@ mod tests {
 
     #[test]
     fn room() {
-        let mut m = AssetMeta { current: copy("a"), others: vec![copy("b")] };
+        let mut m = AssetMeta { current: copy("a"), others: vec![copy("b")], pinned: false };
         assert_eq!(m.room(), Ok(None));
         m.others.push(copy("c"));
+        assert_eq!(m.room(), Ok(None));
+        m.others.push(copy("d"));
         m.vote("k1", "b", 1);
         m.vote("k2", "b", 1);
+        m.vote("k3", "d", 1);
+        m.vote("k4", "d", 1);
         // "c" has no votes: it makes room.
         assert_eq!(m.room(), Ok(Some(1)));
-        m.vote("k3", "c", 1);
-        m.vote("k4", "c", 1);
+        m.vote("k5", "c", 1);
+        m.vote("k6", "c", 1);
         assert_eq!(m.room(), Err(()));
+        // Pinned by the operator: votes don't move it.
+        m.pinned = true;
+        for k in ["x1", "x2", "x3"] {
+            assert_eq!(m.vote(k, "b", 2), None);
+        }
     }
 
     #[test]

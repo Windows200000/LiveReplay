@@ -17,5 +17,9 @@
 	request_body {
 		max_size 70MB
 	}
-	reverse_proxy livereplay:8080
+	reverse_proxy livereplay:8080 {
+		# Small request bodies (JSON, live frames) are received completely by Caddy first, so a
+		# client that sends slowly never holds one of the server's workers.
+		request_buffers 1MB
+	}
 }

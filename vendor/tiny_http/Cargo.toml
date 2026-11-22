@@ -1,0 +1,26 @@
+# tiny_http 0.12.0 (MIT OR Apache-2.0, https://github.com/tiny-http/tiny-http), vendored with
+# fixes for the LiveReplay server (the crate is unmaintained; see PATCHES.md). TLS support is left
+# out: Caddy does HTTPS.
+[package]
+name = "tiny_http"
+version = "0.12.0"
+edition = "2018"
+license = "MIT OR Apache-2.0"
+description = "Low level HTTP server library (vendored 0.12.0 with fixes)"
+
+[dependencies]
+ascii = "1.0"
+chunked_transfer = "1"
+httpdate = "1.0.2"
+log = "0.4.4"
+
+[features]
+# Kept so the crate's own cfg(feature) checks stay valid; never enabled here.
+ssl = []
+ssl-openssl = []
+ssl-rustls = []
+
+[lints.rust]
+unexpected_cfgs = "allow"
+unused_imports = "allow"
+dead_code = "allow"

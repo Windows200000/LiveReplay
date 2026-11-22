@@ -43,6 +43,9 @@ use guard::{Daily, Guard, Visitor};
 /// crashed, was closed, or the battle ended without a final upload).
 const STALE_SECS: u64 = 90;
 const MAX_BODY: usize = 16 << 20;
+/// JSON requests are small (a battle's description with 30 players is ~3 KB); parsing a big one
+/// could take far more memory than its size.
+const MAX_JSON: usize = 64 << 10;
 const MAX_ASSET: u64 = 64 << 20;
 /// Largest original replay file accepted.
 const MAX_REPLAY: u64 = 64 << 20;
@@ -65,8 +68,10 @@ const MAX_TEXT: usize = 100;
 const CODES_PER_REQUEST: usize = 20;
 /// A battle that never got any data is removed after this long.
 const EMPTY_BATTLE_SECS: u64 = 3600;
-/// Public battle lists are answered from a cache this old at most.
+/// Public battle lists are answered from a cache this old at most; lists and live lists are made
+/// from a copy of the battle index this old at most (made outside the lock).
 const LIST_CACHE: Duration = Duration::from_secs(2);
+const SNAPSHOT_AGE: Duration = Duration::from_secs(2);
 /// Storage use is counted again at most this often (and kept up to date in between).
 const USAGE_CACHE: Duration = Duration::from_secs(30);
 
@@ -159,7 +164,8 @@ struct Code {
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Stored {
-    info: BattleInfo,
+    /// Shared with list snapshots (copied only when it changes while a snapshot holds it).
+    info: Arc<BattleInfo>,
     /// Hash of the uploader's key.
     owner: String,
     /// Unix seconds the entry was made.
@@ -196,8 +202,20 @@ struct State {
     /// Assets an app announced it is about to upload: name -> until (Unix seconds). Memory only.
     expected: HashMap<String, u64>,
     dirty: Dirty,
-    /// Changes whenever a battle goes away (cached lists are then out of date at once).
+    /// Changes whenever a battle goes away, gets its first data or ends (cached lists are then
+    /// out of date at once).
     epoch: u64,
+}
+
+/// A copy of what lists need, made at most every [`SNAPSHOT_AGE`] (copied under the lock,
+/// sorted outside it), so busy or made-up list queries never hold the shared state for long.
+struct Snapshot {
+    at: Instant,
+    epoch: u64,
+    /// Battles with data, newest first, with their uploader key.
+    rows: Vec<(Arc<BattleInfo>, String)>,
+    /// Keys whose asset votes may count: they own a player name and uploaded a battle with data.
+    voters: HashSet<String>,
 }
 
 /// Storage in use, per uploader key and in total.
@@ -227,6 +245,7 @@ struct App {
     /// Public battle lists: query -> (epoch, when, JSON).
     list_cache: Mutex<HashMap<String, (u64, Instant, Arc<[u8]>)>>,
     usage: Mutex<Option<(Instant, Usage)>>,
+    snapshot: Mutex<Option<Arc<Snapshot>>>,
 }
 
 fn read_json<T: for<'de> Deserialize<'de> + Default>(p: &Path) -> T {
@@ -235,7 +254,8 @@ fn read_json<T: for<'de> Deserialize<'de> + Default>(p: &Path) -> T {
 
 /// Write a file through a temp file and a rename, so a crash never leaves half a file.
 fn write_atomic(p: &Path, b: &[u8]) -> std::io::Result<()> {
-    let tmp = p.with_extension("tmp");
+    // Its own temp name: two files of one battle (`.bin`, `.json`) may be written at once.
+    let tmp = p.with_file_name(format!(".{}.{}.tmp", p.file_name().unwrap_or_default().to_string_lossy(), token(8)));
     std::fs::write(&tmp, b)?;
     std::fs::rename(&tmp, p)
 }
@@ -375,6 +395,7 @@ impl App {
             io_locks: Mutex::new(HashMap::new()),
             list_cache: Mutex::new(HashMap::new()),
             usage: Mutex::new(None),
+            snapshot: Mutex::new(None),
         }
     }
 
@@ -547,12 +568,15 @@ impl App {
             return;
         }
         let (cur, cand) = (self.asset_path(name), self.candidate_path(name, &m.others[i].hash));
+        // The served file is replaced in one step (a second name keeps the old copy), so a
+        // download at the same moment gets one copy or the other, never nothing.
         let parked = self.candidate_path(name, &m.current.hash);
-        if std::fs::rename(&cur, &parked).is_err() {
+        let _ = std::fs::remove_file(&parked);
+        if std::fs::hard_link(&cur, &parked).is_err() {
             return;
         }
         if std::fs::rename(&cand, &cur).is_err() {
-            let _ = std::fs::rename(&parked, &cur);
+            let _ = std::fs::remove_file(&parked);
             return;
         }
         m.promote(i);
@@ -561,8 +585,36 @@ impl App {
 
     /// Whether an uploader key's asset votes count: it uploaded a battle with data (so it is a
     /// real app with a player name), and few enough keys voted from this visitor today.
-    fn counts(&self, st: &State, v: Visitor, owner: &str) -> bool {
-        st.claims.values().any(|k| k == owner) && st.battles.values().any(|s| s.owner == owner && s.info.size > 0) && self.guard.voter(v, owner)
+    fn counts(&self, v: Visitor, owner: &str) -> bool {
+        self.snapshot().voters.contains(owner) && self.guard.voter(v, owner)
+    }
+
+    /// The list snapshot (made again when older than [`SNAPSHOT_AGE`] or a battle went away).
+    fn snapshot(&self) -> Arc<Snapshot> {
+        // One maker at a time; the others wait for its result instead of making their own.
+        let mut slot = self.snapshot.lock().unwrap_or_else(|e| e.into_inner());
+        let epoch = self.st().epoch;
+        if let Some(s) = slot.as_ref().filter(|s| s.epoch == epoch && s.at.elapsed() < SNAPSHOT_AGE) {
+            return s.clone();
+        }
+        let (mut rows, voters) = {
+            let st = self.st();
+            let rows: Vec<(Arc<BattleInfo>, String)> = st.battles.values().filter(|s| s.info.size > 0).map(|s| (s.info.clone(), s.owner.clone())).collect();
+            let claimed: HashSet<&String> = st.claims.values().collect();
+            let voters: HashSet<String> = rows.iter().map(|r| &r.1).filter(|k| claimed.contains(k)).cloned().collect();
+            (rows, voters)
+        };
+        let key = |d: &str| {
+            let (day, time) = d.split_once(' ').unwrap_or((d, ""));
+            match day.split('.').collect::<Vec<_>>()[..] {
+                [d, m, y] => format!("{y}{m:0>2}{d:0>2}{time}"),
+                _ => d.to_string(),
+            }
+        };
+        rows.sort_by_cached_key(|r| std::cmp::Reverse(key(&r.0.date)));
+        let s = Arc::new(Snapshot { at: Instant::now(), epoch, rows, voters });
+        *slot = Some(s.clone());
+        s
     }
 
     /// Storage use (counted again every [`USAGE_CACHE`], kept up to date in between).
@@ -673,13 +725,13 @@ fn url_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn read_body(rq: &mut Request) -> Result<Vec<u8>, Reply> {
-    if rq.body_length().unwrap_or(0) > MAX_BODY {
+fn read_body(rq: &mut Request, max: usize) -> Result<Vec<u8>, Reply> {
+    if rq.body_length().unwrap_or(0) > max {
         return Err(Reply::err(413, "too large"));
     }
     let mut b = Vec::new();
-    rq.as_reader().take(MAX_BODY as u64 + 1).read_to_end(&mut b).map_err(|_| Reply::err(400, "bad body"))?;
-    if b.len() > MAX_BODY {
+    rq.as_reader().take(max as u64 + 1).read_to_end(&mut b).map_err(|_| Reply::err(400, "bad body"))?;
+    if b.len() > max {
         return Err(Reply::err(413, "too large"));
     }
     Ok(b)
@@ -767,7 +819,7 @@ fn merge_same_battles(data: &Path, st: &mut State) -> usize {
 
 /// A battle as shown: a live upload that stopped without being finished is interrupted.
 fn shown(s: &Stored, t: u64) -> BattleInfo {
-    let mut i = s.info.clone();
+    let mut i = (*s.info).clone();
     if s.info.live && !is_live(s, t) {
         i.live = false;
         i.interrupted = true;
@@ -806,10 +858,6 @@ fn remove_duplicates(data: &Path, st: &mut State) -> usize {
         st.battles.remove(id);
     }
     drop.len()
-}
-
-fn is_live_info(st: &State, id: &str, t: u64) -> bool {
-    st.battles.get(id).is_some_and(|s| is_live(s, t))
 }
 
 /// Owners (key hashes) whose live battles the given codes unlock, and the still-valid codes.
@@ -868,6 +916,9 @@ fn route(app: &App, rq: &mut Request, v: Visitor) -> Reply {
         }
         (Method::Get, ["api", "me"]) => {
             let Some(owner) = key_hash(rq) else { return Reply::err(401, "key required") };
+            if !app.guard.heavy(v) {
+                return Reply::err(429, "too many requests");
+            }
             let st = app.st();
             let t = now();
             // Also uploads of this player's names by an older key (same player, new install).
@@ -881,6 +932,9 @@ fn route(app: &App, rq: &mut Request, v: Visitor) -> Reply {
         }
         (Method::Delete, ["api", "me"]) => {
             let Some(owner) = key_hash(rq) else { return Reply::err(401, "key required") };
+            if !app.guard.heavy(v) {
+                return Reply::err(429, "too many requests");
+            }
             Reply::json(&forget_uploader(app, &mut app.st(), &owner))
         }
         (Method::Get, ["api", "battles"]) => list(app, rq, q, v),
@@ -913,13 +967,16 @@ fn route(app: &App, rq: &mut Request, v: Visitor) -> Reply {
         }
         (Method::Get, ["api", "battles", id, "data"]) => data(app, rq, v, id, q),
         (Method::Get, ["api", "live"]) => {
-            let st = app.st();
-            let (owners, valid) = unlocked(app, &st, rq, v);
+            let (owners, valid) = unlocked(app, &app.st(), rq, v);
             let t = now();
-            let latest_name = |owner: &str| {
-                st.battles.values().filter(|s| s.owner == owner).max_by_key(|s| s.info.updated).map(|s| s.info.player.clone()).unwrap_or_default()
+            let snap = app.snapshot();
+            // Newest first: the first row of an owner is its latest battle.
+            let latest_name = |owner: &str| snap.rows.iter().filter(|r| r.1 == owner).max_by_key(|r| r.0.updated).map(|r| r.0.player.clone()).unwrap_or_default();
+            let mut battles: Vec<BattleInfo> = if owners.is_empty() {
+                Vec::new()
+            } else {
+                snap.rows.iter().filter(|(i, o)| info_live(i, t) && owners.contains(o)).map(|(i, _)| (**i).clone()).collect()
             };
-            let mut battles: Vec<BattleInfo> = st.battles.values().filter(|s| is_live(s, t) && owners.contains(&s.owner)).map(|s| s.info.clone()).collect();
             battles.sort_by(|a, b| b.updated.cmp(&a.updated));
             let battles = one_per_battle(battles);
             let valid = valid.into_iter().map(|(code, owner, expires)| CodeStatus { code, player: latest_name(&owner), expires }).collect();
@@ -930,7 +987,7 @@ fn route(app: &App, rq: &mut Request, v: Visitor) -> Reply {
                 Ok(o) => o,
                 Err(e) => return e,
             };
-            let Ok(body) = read_body(rq) else { return Reply::err(400, "bad body") };
+            let Ok(body) = read_body(rq, MAX_JSON) else { return Reply::err(400, "bad body") };
             let Ok(req) = serde_json::from_slice::<NewCode>(&body) else { return Reply::err(400, "bad json") };
             let days = req.days.clamp(1, MAX_CODE_DAYS) as u64;
             let code = token(10);
@@ -957,7 +1014,13 @@ fn route(app: &App, rq: &mut Request, v: Visitor) -> Reply {
         }
         (Method::Get | Method::Head, ["api", "assets", name]) if valid_asset_name(name) => {
             app.ensure_hash(name);
-            let meta = app.st().assets.get(*name).map(|m| m.current.clone());
+            // Description and file together (a copy promoted meanwhile can't mix them up).
+            let (meta, file) = {
+                let st = app.st();
+                let m = st.assets.get(*name).map(|m| m.current.clone());
+                let f = if m.is_some() && method == Method::Get { std::fs::File::open(app.asset_path(name)).ok() } else { None };
+                (m, f)
+            };
             let Some(c) = meta else { return Reply::err(404, "not found") };
             let etag = if c.hash.is_empty() { format!("\"{}\"", &sha_hex(format!("{}{}", c.version, c.size).as_bytes())[..16]) } else { format!("\"{}\"", &c.hash[..16]) };
             let tagged = |r: Reply| r.header("ETag", etag.clone()).header("Cache-Control", "no-cache").header(VERSION_HEADER, c.version.clone()).header(HASH_HEADER, c.hash.clone());
@@ -967,12 +1030,12 @@ fn route(app: &App, rq: &mut Request, v: Visitor) -> Reply {
             if method == Method::Head {
                 return tagged(Reply::bin(vec![]));
             }
-            match std::fs::File::open(app.asset_path(name)) {
-                Ok(f) => {
+            match file {
+                Some(f) => {
                     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
                     tagged(Reply::file(f, 0, len))
                 }
-                Err(_) => Reply::err(404, "not found"),
+                None => Reply::err(404, "not found"),
             }
         }
         (Method::Put, ["api", "assets", name]) if valid_asset_name(name) => put_asset(app, rq, v, name, q),
@@ -986,11 +1049,13 @@ fn route(app: &App, rq: &mut Request, v: Visitor) -> Reply {
                 return Reply::err(400, "bad hash");
             }
             app.ensure_hash(name);
+            // Before the state is locked (the snapshot locks it itself).
+            let counted = app.counts(v, &owner);
             let mut st = app.st();
-            let counted = app.counts(&st, v, &owner);
             let Some(mut m) = st.assets.get(*name).cloned() else { return Reply::json(&AssetVote { upload: true, counted: false }) };
             if !m.has(&hash) {
-                return Reply::json(&AssetVote { upload: m.room().is_ok(), counted: false });
+                // Only a copy whose vote would count is kept as a candidate.
+                return Reply::json(&AssetVote { upload: counted && m.room().is_ok(), counted: false });
             }
             if counted {
                 if let Some(i) = m.vote(&owner, &hash, now()) {
@@ -1005,7 +1070,7 @@ fn route(app: &App, rq: &mut Request, v: Visitor) -> Reply {
             if let Err(e) = uploader(app, rq) {
                 return e;
             }
-            let Ok(body) = read_body(rq) else { return Reply::err(400, "bad body") };
+            let Ok(body) = read_body(rq, MAX_JSON) else { return Reply::err(400, "bad body") };
             let Ok(names) = serde_json::from_slice::<Vec<String>>(&body) else { return Reply::err(400, "bad json") };
             let t = now();
             let mut st = app.st();
@@ -1110,7 +1175,7 @@ fn put_replay(app: &App, rq: &mut Request, v: Visitor, id: &str) -> Reply {
         return Reply::err(500, "write failed");
     }
     let Some(s) = st.battles.get_mut(id) else { return Reply::err(404, "not found") };
-    s.info.replay_size = r.size;
+    Arc::make_mut(&mut s.info).replay_size = r.size;
     let s = s.clone();
     app.save_battle(&s);
     Reply::json(&s.info)
@@ -1137,9 +1202,10 @@ fn put_asset(app: &App, rq: &mut Request, v: Visitor, name: &str, q: &str) -> Re
         Ok(r) => r,
         Err(e) => return e,
     };
+    // Before the state is locked (the snapshot locks it itself).
+    let counted = app.counts(v, &owner);
     let mut st = app.st();
     st.expected.remove(name);
-    let counted = app.counts(&st, v, &owner);
     let t = now();
     let copy = Copy { hash: r.hash.clone(), version, size: r.size, owner: owner.clone(), votes: vec![] };
     let Some(mut m) = st.assets.get(name).cloned() else {
@@ -1153,7 +1219,7 @@ fn put_asset(app: &App, rq: &mut Request, v: Visitor, name: &str, q: &str) -> Re
         if r.file.place(&app.asset_path(name)).is_err() {
             return Reply::err(500, "write failed");
         }
-        let mut m = AssetMeta { current: copy, others: vec![] };
+        let mut m = AssetMeta { current: copy, others: vec![], pinned: false };
         if counted {
             m.vote(&owner, &r.hash, t);
         }
@@ -1162,8 +1228,12 @@ fn put_asset(app: &App, rq: &mut Request, v: Visitor, name: &str, q: &str) -> Re
         return Reply::json(&AssetVote { upload: false, counted });
     };
     if !m.has(&r.hash) {
-        // Another copy: kept as a candidate if there is room (a candidate nobody else voted for
-        // makes way; one with support doesn't).
+        // Another copy: kept as a candidate only if its uploader's vote counts (a made-up key
+        // can't fill the places or push out a real copy), and if there is room (a candidate
+        // with at most one vote makes way; one with support doesn't).
+        if !counted {
+            return Reply::json(&AssetVote { upload: false, counted: false });
+        }
         if let Some(e) = app.over_limit(&st, &owner, r.size) {
             return e;
         }
@@ -1196,10 +1266,13 @@ fn new_battle(app: &App, rq: &mut Request, v: Visitor) -> Reply {
         Ok(o) => o,
         Err(e) => return e,
     };
-    let body = match read_body(rq) {
+    let body = match read_body(rq, MAX_JSON) {
         Ok(b) => b,
         Err(e) => return e,
     };
+    if !app.guard.heavy(v) {
+        return Reply::err(429, "too many requests");
+    }
     let Ok(mut nb) = serde_json::from_slice::<NewBattle>(&body) else { return Reply::err(400, "bad json") };
     // Everything bounded and plain before it is used or kept.
     nb.realm = nb.realm.trim().to_ascii_uppercase();
@@ -1256,7 +1329,7 @@ fn new_battle(app: &App, rq: &mut Request, v: Visitor) -> Reply {
         let mut changed = s.owner != owner;
         s.owner = owner.clone();
         if !nb.live && !nb.file_name.is_empty() && s.info.file_name.is_empty() {
-            s.info.file_name = nb.file_name.clone();
+            Arc::make_mut(&mut s.info).file_name = nb.file_name.clone();
             changed = true;
         }
         if s.arena_id == 0 && nb.arena_id != 0 {
@@ -1284,7 +1357,7 @@ fn new_battle(app: &App, rq: &mut Request, v: Visitor) -> Reply {
         if let Some(id) = live {
             let s = st.battles.get_mut(&id).unwrap();
             s.owner = owner.clone();
-            s.info.file_name = nb.file_name.clone();
+            Arc::make_mut(&mut s.info).file_name = nb.file_name.clone();
             let s = s.clone();
             app.save_battle(&s);
             return Reply::json(&s.info);
@@ -1340,13 +1413,13 @@ fn new_battle(app: &App, rq: &mut Request, v: Visitor) -> Reply {
     if let Some(mate) = mate {
         let m = st.battles.get_mut(&mate).unwrap();
         if m.info.group.is_empty() {
-            m.info.group = mate.clone();
+            Arc::make_mut(&mut m.info).group = mate.clone();
             let m = m.clone();
             app.save_battle(&m);
         }
         info.group = st.battles[&mate].info.group.clone();
     }
-    let s = Stored { info: info.clone(), owner, created: t, vehicle_ids: nb.vehicle_ids, players, arena_id: nb.arena_id };
+    let s = Stored { info: Arc::new(info.clone()), owner, created: t, vehicle_ids: nb.vehicle_ids, players, arena_id: nb.arena_id };
     app.save_battle(&s);
     st.battles.insert(id, s);
     Reply::json(&info)
@@ -1357,7 +1430,7 @@ fn frames(app: &App, rq: &mut Request, v: Visitor, id: &str, q: &str) -> Reply {
         Ok(o) => o,
         Err(e) => return e,
     };
-    let body = match read_body(rq) {
+    let body = match read_body(rq, MAX_BODY) {
         Ok(b) => b,
         Err(e) => return e,
     };
@@ -1419,18 +1492,23 @@ fn frames(app: &App, rq: &mut Request, v: Visitor, id: &str, q: &str) -> Reply {
         return Reply::err(404, "not found");
     };
     if reset {
-        s.info.gen += 1;
+        Arc::make_mut(&mut s.info).gen += 1;
     }
-    s.info.size = base + len;
-    s.info.updated = now();
+    // Lists change when a battle gets its first data or ends: made again at once.
+    let listed_change = s.info.size == 0 || query(q, "finish").is_some();
+    Arc::make_mut(&mut s.info).size = base + len;
+    Arc::make_mut(&mut s.info).updated = now();
     if query(q, "finish").is_some() {
-        s.info.live = false;
-        s.info.interrupted = query(q, "interrupted").is_some();
+        Arc::make_mut(&mut s.info).live = false;
+        Arc::make_mut(&mut s.info).interrupted = query(q, "interrupted").is_some();
     }
     if let Some(d) = query(q, "damage").and_then(|d| d.parse::<i64>().ok()) {
-        s.info.damage = d.clamp(0, 1_000_000);
+        Arc::make_mut(&mut s.info).damage = d.clamp(0, 1_000_000);
     }
     let s = s.clone();
+    if listed_change {
+        st.epoch += 1;
+    }
     app.save_battle(&s);
     Reply::json(&s.info)
 }
@@ -1440,7 +1518,7 @@ fn data(app: &App, rq: &mut Request, v: Visitor, id: &str, q: &str) -> Reply {
         let st = app.st();
         let Some(s) = st.battles.get(id) else { return Reply::err(404, "not found") };
         let live = is_live(s, now());
-        (s.info.clone(), !live || unlocked(app, &st, rq, v).0.contains(&s.owner))
+        ((*s.info).clone(), !live || unlocked(app, &st, rq, v).0.contains(&s.owner))
     };
     if !allowed {
         return Reply::err(403, "live battle: needs a viewing code from the player");
@@ -1462,25 +1540,52 @@ fn data(app: &App, rq: &mut Request, v: Visitor, id: &str, q: &str) -> Reply {
     tag(Reply::file(f, from.min(end), end - from.min(end)))
 }
 
-/// Several uploads of one battle (a group) shown once: the first, with every uploader's name.
-fn one_per_battle(v: Vec<BattleInfo>) -> Vec<BattleInfo> {
-    let mut names: HashMap<String, Vec<String>> = HashMap::new();
+/// Several uploads of one battle (a group) shown once, with every uploader's name: the first
+/// upload of it (the group is named after it), so a later upload can't take its place.
+/// Works on references; returns the entries kept and each group's uploader names.
+fn group_view<'a>(v: &[&'a BattleInfo]) -> (Vec<&'a BattleInfo>, HashMap<&'a str, Vec<&'a str>>) {
+    let mut names: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut roots = HashSet::new();
     for b in v.iter().filter(|b| !b.group.is_empty()) {
-        let n = names.entry(b.group.clone()).or_default();
-        if !n.contains(&b.player) {
-            n.push(b.player.clone());
+        let n = names.entry(b.group.as_str()).or_default();
+        if !n.contains(&b.player.as_str()) {
+            n.push(&b.player);
+        }
+        if b.id == b.group {
+            roots.insert(b.group.as_str());
         }
     }
     let mut seen = HashSet::new();
-    v.into_iter()
-        .filter(|b| b.group.is_empty() || seen.insert(b.group.clone()))
-        .map(|mut b| {
-            if let Some(n) = names.get(&b.group).filter(|n| n.len() > 1) {
-                b.uploaders = n.clone();
-            }
-            b
-        })
-        .collect()
+    let kept = v.iter().copied().filter(|b| b.group.is_empty() || if roots.contains(b.group.as_str()) { b.id == b.group } else { seen.insert(b.group.as_str()) }).collect();
+    (kept, names)
+}
+
+/// The uploaders of an entry's group, when more than one.
+fn with_uploaders(mut b: BattleInfo, names: &HashMap<&str, Vec<&str>>) -> BattleInfo {
+    if let Some(n) = names.get(b.group.as_str()).filter(|n| n.len() > 1) {
+        b.uploaders = n.iter().map(|s| s.to_string()).collect();
+    }
+    b
+}
+
+fn one_per_battle(v: Vec<BattleInfo>) -> Vec<BattleInfo> {
+    let refs: Vec<&BattleInfo> = v.iter().collect();
+    let (kept, names) = group_view(&refs);
+    kept.into_iter().map(|b| with_uploaders(b.clone(), &names)).collect()
+}
+
+/// A battle in a list: still live, or interrupted (a live upload that stopped).
+fn shown_info(i: &BattleInfo, t: u64) -> BattleInfo {
+    let mut i = i.clone();
+    if i.live && t.saturating_sub(i.updated) >= STALE_SECS {
+        i.live = false;
+        i.interrupted = true;
+    }
+    i
+}
+
+fn info_live(i: &BattleInfo, t: u64) -> bool {
+    i.live && t.saturating_sub(i.updated) < STALE_SECS
 }
 
 fn list(app: &App, rq: &Request, q: &str, v: Visitor) -> Reply {
@@ -1498,37 +1603,28 @@ fn list(app: &App, rq: &Request, q: &str, v: Visitor) -> Reply {
             }
         }
     }
-    let st = app.st();
+    // Made-up queries (each one new) can't be cached: they count as expensive.
+    if !player.is_empty() && !app.guard.heavy(v) {
+        return Reply::err(429, "too many searches, try again in a moment");
+    }
     let t = now();
     // A group's live members too, for whoever may see them (viewing code, or the uploader).
-    let owners = if group.is_empty() { Vec::new() } else { unlocked(app, &st, rq, v).0 };
-    let mut v: Vec<BattleInfo> = st
-        .battles
-        .values()
-        .filter(|s| (!is_live(s, t) || owners.contains(&s.owner)) && s.info.size > 0)
-        .filter(|s| player.is_empty() || s.info.player.to_lowercase().contains(&player))
-        .filter(|s| group.is_empty() || s.info.group == group)
-        .map(|s| shown(s, t))
+    let owners = if group.is_empty() { Vec::new() } else { unlocked(app, &app.st(), rq, v).0 };
+    let snap = app.snapshot();
+    // References only; just the page's entries are copied.
+    let v: Vec<&BattleInfo> = snap
+        .rows
+        .iter()
+        .filter(|(i, owner)| !info_live(i, t) || owners.contains(owner))
+        .filter(|(i, _)| group.is_empty() || i.group == group)
+        .filter(|(i, _)| player.is_empty() || i.player.to_lowercase().contains(&player))
+        .map(|(i, _)| &**i)
         .collect();
-    let key = |d: &str| {
-        let (day, time) = d.split_once(' ').unwrap_or((d, ""));
-        match day.split('.').collect::<Vec<_>>()[..] {
-            [d, m, y] => format!("{y}{m:0>2}{d:0>2}{time}"),
-            _ => d.to_string(),
-        }
-    };
-    v.sort_by_cached_key(|b| std::cmp::Reverse(key(&b.date)));
     // The battle list: one entry per battle; a group's own list: every viewpoint.
-    if group.is_empty() {
-        v = one_per_battle(v);
-    }
+    let (v, names) = if group.is_empty() { group_view(&v) } else { (v, HashMap::new()) };
     let total = v.len();
-    let battles = v.into_iter().skip(page * PER_PAGE).take(PER_PAGE).map(|mut i| {
-        i.live = is_live_info(&st, &i.id, t);
-        i
-    });
-    let body: Arc<[u8]> = serde_json::to_vec(&BattleList { battles: battles.collect(), total, page, per_page: PER_PAGE }).unwrap_or_default().into();
-    drop(st);
+    let battles = v.into_iter().skip(page * PER_PAGE).take(PER_PAGE).map(|i| with_uploaders(shown_info(i, t), &names)).collect();
+    let body: Arc<[u8]> = serde_json::to_vec(&BattleList { battles, total, page, per_page: PER_PAGE }).unwrap_or_default().into();
     if public {
         let mut c = app.list_cache.lock().unwrap_or_else(|e| e.into_inner());
         if c.len() > 2000 {
@@ -1645,7 +1741,8 @@ fn main() {
     let bind = std::env::var("BIND").unwrap_or_else(|_| "0.0.0.0:8080".into());
     let data = PathBuf::from(std::env::var("DATA_DIR").unwrap_or_else(|_| "data".into()));
     let web = PathBuf::from(std::env::var("WEB_DIR").unwrap_or_else(|_| "web-dist".into()));
-    let threads: usize = std::env::var("THREADS").ok().and_then(|t| t.parse().ok()).unwrap_or(16);
+    // Many workers (threads cost little while they wait); one visitor can hold only a few.
+    let threads: usize = std::env::var("THREADS").ok().and_then(|t| t.parse().ok()).unwrap_or(64);
     let app = Arc::new(App::load(data, &web));
     let server = Arc::new(Server::http(&bind).expect("bind"));
     println!("listening on http://{bind}");
@@ -1662,12 +1759,14 @@ fn main() {
             std::thread::spawn(move || {
                 for mut rq in server.incoming_requests() {
                     let v = app.guard.visitor(rq.remote_addr(), header(&rq, "X-Forwarded-For"));
-                    let r = if app.guard.request(v) {
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| route(&app, &mut rq, v))).unwrap_or_else(|_| Reply::err(500, "internal error"))
-                    } else {
-                        Reply::err(429, "too many requests").header("Retry-After", "10")
+                    let busy = if app.guard.request(v) { app.guard.enter(v) } else { None };
+                    let r = match &busy {
+                        Some(_) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| route(&app, &mut rq, v))).unwrap_or_else(|_| Reply::err(500, "internal error")),
+                        None => Reply::err(429, "too many requests").header("Retry-After", "5"),
                     };
+                    // Still counted while the answer is sent (a slow reader holds a worker too).
                     respond(rq, r);
+                    drop(busy);
                     app.flush();
                 }
             })
@@ -1683,7 +1782,7 @@ mod tests {
     use super::*;
 
     fn stored(id: &str, owner: &str, map: &str, tanks: &[i32], size: u64, created: u64) -> Stored {
-        let info = BattleInfo { id: id.into(), player: "p".into(), map: map.into(), size, live: true, ..Default::default() };
+        let info = Arc::new(BattleInfo { id: id.into(), player: "p".into(), map: map.into(), size, live: true, ..Default::default() });
         Stored { info, owner: owner.into(), created, vehicle_ids: tanks.to_vec(), players: vec![], arena_id: 0 }
     }
 
@@ -1694,17 +1793,17 @@ mod tests {
         let mut st = State::default();
         st.claims.insert(claim_key("EU", "p"), "new".into());
         let mut a = stored("a", "old", "m", &[], 500, 1);
-        a.info.file_name = "x.wotreplay".into();
-        a.info.realm = "EU".into();
-        a.info.live = false;
+        Arc::make_mut(&mut a.info).file_name = "x.wotreplay".into();
+        Arc::make_mut(&mut a.info).realm = "EU".into();
+        Arc::make_mut(&mut a.info).live = false;
         let mut b = stored("b", "new", "m", &[], 400, 2);
-        b.info.file_name = "x.wotreplay".into();
-        b.info.realm = "EU".into();
-        b.info.live = false;
-        b.info.replay_size = 900;
+        Arc::make_mut(&mut b.info).file_name = "x.wotreplay".into();
+        Arc::make_mut(&mut b.info).realm = "EU".into();
+        Arc::make_mut(&mut b.info).live = false;
+        Arc::make_mut(&mut b.info).replay_size = 900;
         let mut c = stored("c", "old", "m", &[], 300, 3);
-        c.info.file_name = "other.wotreplay".into();
-        c.info.realm = "EU".into();
+        Arc::make_mut(&mut c.info).file_name = "other.wotreplay".into();
+        Arc::make_mut(&mut c.info).realm = "EU".into();
         for s in [a, b, c] {
             st.battles.insert(s.info.id.clone(), s);
         }
@@ -1738,6 +1837,15 @@ mod tests {
         left.sort();
         assert_eq!(left, ["a2", "b1", "c1"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn group_shows_first_upload() {
+        let b = |id: &str, group: &str, player: &str| BattleInfo { id: id.into(), group: group.into(), player: player.into(), ..Default::default() };
+        // A later upload dated first can't stand in for the battle.
+        let v = one_per_battle(vec![b("fake", "orig", "mallory"), b("x", "", "p"), b("orig", "orig", "alice")]);
+        assert_eq!(v.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), ["x", "orig"]);
+        assert_eq!(v[1].uploaders, ["mallory", "alice"]);
     }
 
     #[test]

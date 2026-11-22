@@ -73,17 +73,25 @@ stores and serves it, and the web viewer (the same viewer compiled to WebAssembl
   `DATA_PATH=/mnt/data/livereplay`; create it and `sudo chown -R 1000:1000` it first, the server runs as uid 1000). Back it up. Without Docker: `cargo build --release -p livereplay-server`,
   `sh web/build.sh`, then run `livereplay-server` (env `BIND`, `DATA_DIR`, `WEB_DIR`, `THREADS`, plus the ones above).
 * Limits (env, optional). Uploader keys cost nothing to make, so the limits that matter are per visitor (network
-  address; IPv6 per /64), counted in memory only with a salted hash, forgotten within a day: requests
-  `RATE_PER_SEC` (25) / `RATE_BURST` (600), new battles `IP_BATTLES_PER_DAY` (400), new player names `IP_NAMES_PER_DAY`
-  (10), viewing codes `IP_CODES_PER_DAY` (60), new game-data names `IP_NEW_ASSETS_PER_DAY` (3000), uploaded MB
-  `IP_UPLOAD_MB_PER_DAY` (4096); at most 20 different wrong viewing codes per hour (then its codes are ignored, so codes
+  address; IPv6: rates per /64, daily counts per /48), counted in memory only with a salted hash, forgotten within a
+  day: requests `RATE_PER_SEC` (25) / `RATE_BURST` (600), requests at once `MAX_IN_FLIGHT` (8; slow clients can't take
+  every worker, `THREADS` default 64), expensive requests (a key's data, new battles, searches) 2/s (burst 30), new
+  battles `IP_BATTLES_PER_DAY` (400), new player names `IP_NAMES_PER_DAY` (10), viewing codes `IP_CODES_PER_DAY` (60),
+  new game-data names `IP_NEW_ASSETS_PER_DAY` (500), uploaded MB `IP_UPLOAD_MB_PER_DAY` (1024); JSON requests at most
+  64 KB; at most 20 different wrong viewing codes per hour (then its codes are ignored, so codes
   can't be guessed). Per uploader key: `MAX_BATTLES_PER_DAY` (300), `MAX_KEY_MB` (2048), 10 player names; whole server:
   `MAX_TOTAL_GB` (50, battles + original replays + shared game data). Behind the proxy the visitor is the last
   `X-Forwarded-For` entry (only trusted from private / loopback addresses, i.e. Caddy). Battles that never got data are
   removed after an hour.
 * Small machine: uploads go straight to disk and downloads are streamed from it (measured: 4 parallel 60 MB uploads and
-  downloads, 9 MB peak memory); no large file is read or written while the shared state is locked; public battle lists
-  come from a 2 s cache. Container: 1 GB memory, 1.5 CPUs.
+  downloads, 9 MB peak memory); no large file is read or written while the shared state is locked; lists are made from
+  a snapshot of the battle index (shared, not copied; made at most every 2 s, outside the lock) and public pages are
+  cached. Measured with 100k battles: ~310 MB, a list page 6 ms, other requests answered in ~10 ms while 15 clients
+  attack with made-up searches. Caddy receives small request bodies completely before passing them on. Container:
+  1 GB memory, 1.5 CPUs.
+* HTTP library: tiny_http 0.12 (unmaintained), vendored in `vendor/tiny_http` with fixes (`PATCHES.md`): a request
+  claiming a huge `Content-Length` crashed the whole server (found in this review), unbounded header lines.
+  Replacing it with a maintained server (hyper) is the longer-term fix.
 * Security: the server never runs or interprets uploads. Battle data, original replays and game data are stored as opaque
   bytes and only served back as `application/octet-stream` with `nosniff` and a sandbox CSP; the small JSON descriptions
   are parsed into fixed types and every text in them is bounded and stripped of control characters; header values with
@@ -92,11 +100,13 @@ stores and serves it, and the web viewer (the same viewer compiled to WebAssembl
 * Shared game data is voted on: the first upload is served at once; a different upload of the same asset is kept as a
   candidate (3 copies at most) and every uploader key has one vote per asset (its latest upload or vote). The copy with
   the most votes is served. Votes count only from keys that uploaded a battle with data, from at most 4 keys per visitor
-  and day, and expire after 120 days (so new game data takes over after an update as players' apps vote for it).
+  and day, and expire after 120 days (so new game data takes over after an update as players' apps vote for it). Only
+  uploads whose vote counts are kept as candidates (4 copies at most), so made-up keys can't fill the places or push a
+  real copy out; the operator can pin a copy on `/admin`.
 * Operator page: `https://<domain>/admin` (type `ADMIN_TOKEN`): overview (biggest uploaders, newest battles, contested
   game data, blocked keys), delete a battle, delete a player's uploads and free the name (optionally every battle the
   player is in: objection from a player who didn't upload), block an uploader key (removes everything it uploaded; also
-  by player name or battle), delete one or all game data. Same as `curl` calls, see `api/src/lib.rs`.
+  by player name or battle), pin a copy of game data, delete one or all game data. Same as `curl` calls, see `api/src/lib.rs`.
 * Privacy (GDPR): the policy is served at `/privacy` from the operator settings. No IP addresses or access logs, no cookies,
   no tracking. Uploaders consent in the app before the first upload and can download (`GET /api/me`) or delete
   (`DELETE /api/me`, `DELETE /api/battles/<id>`) their data from Settings. "This player name belongs to another
@@ -139,6 +149,16 @@ Nothing open.
   data that the next chunk arrives in time, learnt from how far apart chunks arrive, reached by playing a few percent
   faster/slower (no jumps); the app uploads every 2 s (was 4) and the website fetches every second (was 3), so the
   delay settles at a few seconds. Also for the desktop live view
+- Second, independent security review (goal: confirm the fixes, find what is still lacking), each finding re-tested
+  by attacking a local server with 100k battles: a request claiming a huge `Content-Length` crashed the whole server
+  (tiny_http bug, older than these changes; fixed in a vendored copy); 16 MB JSON of empty strings took ~150 MB each
+  (JSON now max 64 KB); slow senders could take all 16 workers (8 at once per visitor, 64 workers, Caddy buffers
+  small bodies); made-up list searches held the lock 200 ms each (snapshot outside the lock, searches limited,
+  page 118 -> 6 ms); asset candidates could be filled or evicted by made-up keys (only counted uploads kept, operator
+  pin); IPv6 daily limits per /48; a later upload could replace a battle's first upload in lists (the first one
+  stands for the group); temp file names of a battle's two files could collide (unique names)
+- Live playback tested in a browser (headless Chromium, made-up live battle from `examples/synthlive.rs` sent like the
+  app does): 0 frozen frames in 75 s once settled
 - Dependencies current, `cargo audit` clean (user): egui/eframe 0.37 (glow kept for 3D), ureq 3, sha2 0.11,
   getrandom 0.4, blowfish 0.10, directories 6, brotli 9; self-update refuses releases without GitHub's SHA-256 digest
   and downloads from anywhere but this repo's releases; `web/build.sh` checks the wasm-bindgen download against

@@ -73,7 +73,9 @@ async function load() {
   h += "<h2>Newest battles</h2>" + table(["id", "player", "map", "date", "key", "KB"],
     o.recent.map((b) => [`<a href="/battle/${esc(b.id)}">${esc(b.id)}</a>`, esc(b.realm + ":" + b.player), esc(b.map), esc(b.date), `<code>${esc(b.key)}</code>`, Math.round(b.size / 1024)]));
   h += "<h2>Contested game data</h2>" + (o.contested.length ? table(["asset", "copies (served first): hash, version, votes, MB"],
-    o.contested.map((a) => [esc(a.name), a.copies.map((c) => `<code>${esc(c.hash)}</code> ${esc(c.version)} ${c.votes} votes ${mb(c.size)}`).join("<br>")])) : "<p class=muted>none</p>");
+    o.contested.map((a) => [esc(a.name) + (a.pinned ? " (pinned)" : ""), a.copies.map((c) => `<code>${esc(c.hash)}</code> ${esc(c.version)} ${c.votes} votes ${mb(c.size)} ` +
+      `<button data-pin="${esc(a.name)}" data-hash="${esc(c.hash)}">serve this one</button>`).join("<br>") +
+      (a.pinned ? ` <button data-unpin="${esc(a.name)}">let votes decide</button>` : "")])) : "<p class=muted>none</p>");
   h += "<h2>Blocked keys</h2>" + (o.blocked.length ? table(["key", ""], o.blocked.map((k) => [`<code>${esc(k)}</code>`, `<button data-unblock="${esc(k)}">unblock</button>`])) : "<p class=muted>none</p>");
   $("overview").innerHTML = h;
 }
@@ -90,6 +92,8 @@ $("del-assets").addEventListener("click", () => act("DELETE", "/api/admin/assets
 $("overview").addEventListener("click", (e) => {
   const b = e.target.closest("button");
   if (b && b.dataset.block) act("POST", "/api/admin/block?key=" + encodeURIComponent(b.dataset.block), "Block key " + b.dataset.block);
+  if (b && b.dataset.pin) act("POST", "/api/admin/assets/" + encodeURIComponent(b.dataset.pin) + "/pin?hash=" + encodeURIComponent(b.dataset.hash), "Always serve this copy of " + b.dataset.pin);
+  if (b && b.dataset.unpin) act("DELETE", "/api/admin/assets/" + encodeURIComponent(b.dataset.unpin) + "/pin", "Let votes decide " + b.dataset.unpin);
   if (b && b.dataset.unblock) act("DELETE", "/api/admin/block/" + encodeURIComponent(b.dataset.unblock), "Unblock key " + b.dataset.unblock);
 });
 "#;
@@ -143,6 +147,7 @@ struct CopyInfo {
 #[derive(Serialize)]
 struct Contested {
     name: String,
+    pinned: bool,
     copies: Vec<CopyInfo>,
 }
 
@@ -193,9 +198,10 @@ fn overview(st: &State) -> Overview {
     let mut contested: Vec<Contested> = st
         .assets
         .iter()
-        .filter(|(_, m)| !m.others.is_empty())
+        .filter(|(_, m)| !m.others.is_empty() || m.pinned)
         .map(|(name, m)| Contested {
             name: name.clone(),
+            pinned: m.pinned,
             copies: m.copies().map(|c| CopyInfo { hash: short(&c.hash), version: c.version.clone(), votes: c.votes.len(), size: c.size }).collect(),
         })
         .collect();
@@ -260,6 +266,7 @@ pub fn route(app: &App, rq: &mut Request, method: &Method, parts: &[&str], q: &s
             } else if let Some(p) = query(q, "player") {
                 let (realm, name) = player_arg(&p);
                 let mut owners: Vec<&String> = st.claims.iter().filter(|(c, _)| c.split_once(':').is_some_and(|(r, n)| n == name && realm.as_ref().is_none_or(|x| x == r))).map(|(_, k)| k).collect();
+                owners.sort();
                 owners.dedup();
                 (owners.len() == 1).then(|| owners[0].clone())
             } else {
@@ -276,6 +283,30 @@ pub fn route(app: &App, rq: &mut Request, method: &Method, parts: &[&str], q: &s
             let Some(key) = find_key(&st, prefix).filter(|k| st.blocked.contains(k)) else { return Reply::err(404, "not blocked") };
             st.blocked.remove(&key);
             st.dirty.blocked = true;
+            Reply::json(&())
+        }
+        (Method::Post | Method::Delete, ["assets", name, "pin"]) if valid_asset_name(name) => {
+            // Serve the copy whose hash starts with `hash` and keep it (votes change nothing);
+            // DELETE: let votes decide again.
+            let Some(mut m) = st.assets.get(*name).cloned() else { return Reply::err(404, "no such asset") };
+            if *method == Method::Delete {
+                m.pinned = false;
+            } else {
+                let prefix = query(q, "hash").unwrap_or_default();
+                if prefix.len() < 8 {
+                    return Reply::err(400, "hash (at least 8 characters) required");
+                }
+                if !m.current.hash.starts_with(&prefix) {
+                    let Some(i) = m.others.iter().position(|c| c.hash.starts_with(&prefix)) else { return Reply::err(404, "no such copy") };
+                    app.promote(name, &mut m, i);
+                    if !m.current.hash.starts_with(&prefix) {
+                        return Reply::err(500, "could not switch copies");
+                    }
+                }
+                m.pinned = true;
+            }
+            app.save_asset(name, &m);
+            st.assets.insert(name.to_string(), m);
             Reply::json(&())
         }
         (Method::Delete, ["assets", name]) if valid_asset_name(name) => {

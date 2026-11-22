@@ -38,6 +38,8 @@
 //!   uploader key and remove everything it uploaded;  `DELETE /api/admin/block/{hashprefix}`
 //! - `DELETE /api/admin/assets/{name}`, `DELETE /api/admin/assets`: remove shared game data
 //!   (clients upload it again)
+//! - `POST /api/admin/assets/{name}/pin?hash=PREFIX`: always serve that copy (votes change
+//!   nothing);  `DELETE /api/admin/assets/{name}/pin`: let votes decide again
 
 use serde::{Deserialize, Serialize};
 

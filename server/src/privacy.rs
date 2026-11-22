@@ -8,7 +8,7 @@ fn esc(s: &str) -> String {
 
 pub fn page() -> String {
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
-    let name = env("OPERATOR_NAME").unwrap_or_else(|| "the operator of this website".into());
+    let name = esc(&env("OPERATOR_NAME").unwrap_or_else(|| "the operator of this website".into()));
     let contact = env("OPERATOR_CONTACT").unwrap_or_else(|| "(contact not configured: set OPERATOR_CONTACT)".into());
     let contact_html = if contact.contains('@') && !contact.contains(' ') {
         format!("<a href=\"mailto:{0}\">{0}</a>", esc(&contact))
