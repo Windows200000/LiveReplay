@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use livereplay::gamedata::{ArenaDef, GameplayDef};
 use livereplay::net::api::*;
 use livereplay::net::{encode_pack, IconPack, MapPack};
-use livereplay::replay::battle::{Battle, Period, Sample, VehicleRec};
+use livereplay::replay::battle::{Battle, Event, EventKind, Hit, Period, Sample, Shot, VehicleRec};
 use livereplay::replay::wire;
 
 fn main() {
@@ -63,6 +63,26 @@ fn main() {
                 v.track.push(Sample { t, pos: [r * a.cos(), 0.0, r * a.sin()], yaw: a + std::f32::consts::FRAC_PI_2, ..Default::default() });
                 if v.visibility.is_empty() {
                     v.visibility.push((0.0, true));
+                }
+            }
+        }
+        // A shell every second, taking turns: 2 of 4 do damage, 1 bounces, 1 misses.
+        while (b.shots.len() as f32) < t - 1.0 {
+            let n = b.shots.len() as i32;
+            let shooter = n % 10 + 1;
+            let target = (n + 3) % 10 + 1;
+            let st = b.shots.len() as f32 + 1.0;
+            let (from, to) = (b.vehicles[&shooter].track.last().unwrap().pos, b.vehicles[&target].track.last().unwrap().pos);
+            let hit = (n % 4 != 3).then_some(target);
+            b.shots.push(Shot { t: st, shooter, id: n, start: from, end: to, end_t: st + 0.3, hit, ..Default::default() });
+            if let Some(target) = hit {
+                b.hits.push(Hit { t: st + 0.3, target, attacker: shooter });
+                if n % 4 < 2 {
+                    let v = b.vehicles.get_mut(&target).unwrap();
+                    let hp = v.health.last().map(|h| h.1).unwrap_or(v.max_health);
+                    let amount = 240 + (n % 3) * 30;
+                    v.health.push((st + 0.3, (hp - amount).max(1)));
+                    b.events.push(Event { t: st + 0.3, kind: EventKind::Damage { attacker: shooter, target, amount } });
                 }
             }
         }

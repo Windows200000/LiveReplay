@@ -4,5 +4,6 @@ pub mod pickle;
 pub mod battle;
 pub mod wire;
 pub mod merge;
+pub mod shotstats;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cached_results;

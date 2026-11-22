@@ -135,6 +135,12 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 Nothing open.
 
 ### Done
+- Damage stats next to each team's HP bar (user): dealt, blocked (shells that hit without damage: bounced or not
+  penetrated) and missed (shells that hit no tank); whole battle on top, last minute below; hover explains them. Only
+  what the recording saw (more with merged viewpoints). Dealt is exact (every health loss by its cause); blocked and
+  missed are estimates: such shells times the shooter's median damage per shell in this battle (else its tank type's,
+  tier's, everyone's), since a replay doesn't say what a shell would have done. The top bar is a little taller for it;
+  numbers shorten to "4.9k" when narrow. Checked in the browser with `examples/synthlive.rs` (now also shoots)
 - Website lists update themselves (user: "especially when a live battle ends"): the battle list refreshes quietly
   every 10 s (no spinner; a failed refresh keeps what is shown), the live list every 5 s (was 15), and when a live
   battle ends the battle list reloads at once (tested in a browser: in the list within 0.5 s of the end)

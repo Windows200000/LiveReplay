@@ -97,6 +97,8 @@ pub struct ReplayViewer {
     live_follow: Option<bool>,
     /// How far behind the newest data a live battle plays (learnt from how data arrives).
     pace: super::live_pace::LivePace,
+    /// Damage dealt / blocked / missed (made again when the battle data changes).
+    shot_stats: crate::replay::shotstats::ShotStats,
     live_ended: bool,
     /// Open at this many seconds after battle start instead of the beginning.
     pub start_at: Option<f32>,
@@ -336,7 +338,7 @@ fn class_order(c: Option<crate::gamedata::VehicleClass>) -> u8 {
 
 /// Design size of the top bar; everything scales with the width it gets.
 const TOP_BAR_W: f32 = 900.0;
-const TOP_BAR_H: f32 = 46.0;
+const TOP_BAR_H: f32 = 56.0;
 
 /// Top-bar rectangle for a given available width (keeps the design aspect ratio).
 pub fn top_bar_size(avail_w: f32) -> egui::Vec2 {
@@ -348,7 +350,13 @@ pub fn top_bar_size(avail_w: f32) -> egui::Vec2 {
 /// bar with the team HP next to the score (HP difference at the far left), and below it the class
 /// icons running outward from the score - alive first (by class), destroyed ones small and dim.
 /// Scaled to the rectangle so every icon always fits.
-pub fn top_bar(painter: &egui::Painter, rect: egui::Rect, b: &Battle, t: f32) {
+/// What the damage numbers next to the team HP bars mean (hover text).
+pub const TOP_STATS_HELP: &str = "Next to each team's HP bar: damage dealt (team colour), blocked (amber: shells that hit \
+and did no damage, bounced or not penetrated) and missed (grey: shells that hit no tank). Top: the whole battle; below: \
+the last minute.\n\nOnly what this recording saw (more with other players' viewpoints merged in). Blocked and missed are \
+estimates: the number of such shells times the shooter's usual damage per shell in this battle.";
+
+pub fn top_bar(painter: &egui::Painter, rect: egui::Rect, b: &Battle, t: f32, stats: Option<&crate::replay::shotstats::ShotStats>) {
     use super::minimap2d::{class_icon, ALLY, ENEMY};
     let s = rect.width() / TOP_BAR_W;
     let is_dead = |v: &crate::replay::battle::VehicleRec| v.death_time.map(|d| d <= t).unwrap_or(false);
@@ -387,8 +395,13 @@ pub fn top_bar(painter: &egui::Painter, rect: egui::Rect, b: &Battle, t: f32) {
 
     let inner = box_w + 10.0 * s; // distance from the centre to where each side starts
     let side_w = rect.width() / 2.0 - inner - 8.0 * s;
-    let row1 = top + 13.0 * s;
-    let row2 = top + 32.0 * s;
+    // HP difference at the far left (drawn below; its width is kept free).
+    let diff = ahp - ehp;
+    let diff_text = format!("{}{}", if diff > 0 { "+" } else { "" }, format_thousands(diff));
+    let diff_w = painter.layout_no_wrap(diff_text.clone(), num_font.clone(), Color32::WHITE).size().x;
+    // HP bars, the damage numbers beside them (two lines), then the class icons.
+    let row1 = top + 16.0 * s;
+    let row2 = top + 42.0 * s;
     for (ally, cur, max, list) in [(true, ahp, amax, &allies), (false, ehp, emax, &enemies)] {
         let dir = if ally { -1.0 } else { 1.0 }; // outward
         let start = c + dir * inner;
@@ -399,13 +412,50 @@ pub fn top_bar(painter: &egui::Painter, rect: egui::Rect, b: &Battle, t: f32) {
         let galley = painter.layout_no_wrap(num.clone(), num_font.clone(), Color32::WHITE);
         painter.text(egui::pos2(start, row1), align, num, num_font.clone(), Color32::from_gray(235));
         let bar_start = start + dir * (galley.size().x + 8.0 * s);
-        let bar_len = (side_w * 0.42).max(10.0);
+        // Shorter when the damage numbers go next to it.
+        let bar_len = (side_w * if stats.is_some() { 0.24 } else { 0.42 }).max(10.0);
         let bar_h = (5.0 * s).max(2.0);
         let track = egui::Rect::from_two_pos(egui::pos2(bar_start, row1 - bar_h / 2.0), egui::pos2(bar_start + dir * bar_len, row1 + bar_h / 2.0));
         painter.rect_filled(track, 1.5 * s, Color32::from_white_alpha(25));
         let frac = if max > 0 { cur as f32 / max as f32 } else { 0.0 };
         let fill = egui::Rect::from_two_pos(egui::pos2(bar_start, track.top()), egui::pos2(bar_start + dir * bar_len * frac, track.bottom()));
         painter.rect_filled(fill, 1.5 * s, col);
+
+        // Damage dealt / blocked / missed beyond the bar: whole battle on top, last minute below.
+        if let Some(stats) = stats {
+            let team = if ally { b.recorder_team } else { 3 - b.recorder_team.clamp(1, 2) };
+            let from = bar_start + dir * (bar_len + 6.0 * s);
+            let to = if ally { rect.left() + diff_w + 14.0 * s } else { rect.right() - 6.0 * s };
+            let w = (to - from).abs();
+            if w > 60.0 * s {
+                let cw = w / 3.0;
+                let big = egui::FontId::proportional((13.0 * s).max(7.5));
+                let small = egui::FontId::proportional((10.5 * s).max(6.5));
+                let blocked_col = Color32::from_rgb(230, 180, 90);
+                let missed_col = Color32::from_gray(150);
+                for (line, (a, b2), font, dim) in [(0, (0.0, t), &big, 1.0), (1, ((t - 60.0).max(0.0), t), &small, 0.7)] {
+                    let tot = stats.totals(team, a, b2);
+                    let y = top + if line == 0 { 10.0 } else { 28.5 } * s;
+                    // Full numbers when they fit the column, else short ones (12.3k).
+                    let fit = |n: i32, approx: bool| {
+                        let pre = if approx { "\u{2248}" } else { "" };
+                        let full = format!("{pre}{}", format_thousands(n));
+                        if painter.layout_no_wrap(full.clone(), font.clone(), Color32::WHITE).size().x <= cw - 4.0 * s {
+                            full
+                        } else if n.abs() >= 1000 {
+                            format!("{pre}{:.1}k", n as f32 / 1000.0)
+                        } else {
+                            format!("{pre}{n}")
+                        }
+                    };
+                    let cells = [(fit(tot.dealt, false), col), (fit(tot.blocked.round() as i32, true), blocked_col), (fit(tot.missed.round() as i32, true), missed_col)];
+                    for (i, (text, c)) in cells.into_iter().enumerate() {
+                        let x = from + dir * cw * (i as f32 + 0.5);
+                        painter.text(egui::pos2(x, y), egui::Align2::CENTER_CENTER, text, font.clone(), c.gamma_multiply(dim));
+                    }
+                }
+            }
+        }
 
         // Class icons below, from the score outward; spacing shrinks so all of them fit.
         let n = list.len().max(1) as f32;
@@ -422,14 +472,7 @@ pub fn top_bar(painter: &egui::Painter, rect: egui::Rect, b: &Battle, t: f32) {
         }
     }
     // HP difference at the far left
-    let diff = ahp - ehp;
-    painter.text(
-        egui::pos2(rect.left() + 8.0 * s, row1),
-        egui::Align2::LEFT_CENTER,
-        format!("{}{}", if diff > 0 { "+" } else { "" }, format_thousands(diff)),
-        num_font,
-        if diff >= 0 { ALLY } else { ENEMY },
-    );
+    painter.text(egui::pos2(rect.left() + 8.0 * s, row1), egui::Align2::LEFT_CENTER, diff_text, num_font, if diff >= 0 { ALLY } else { ENEMY });
 }
 
 fn format_thousands(v: i32) -> String {
@@ -650,6 +693,7 @@ impl ReplayViewer {
             settings: ViewerSettings::load(),
             live_follow: live.then_some(true),
             pace: Default::default(),
+            shot_stats: Default::default(),
             live_ended: false,
             start_at: None,
             autoplay: false,
@@ -872,6 +916,9 @@ impl ReplayViewer {
                 }
             }
             ctx.request_repaint();
+        }
+        if !self.shot_stats.is_for(&loaded.battle) {
+            self.shot_stats = crate::replay::shotstats::ShotStats::new(&loaded.battle);
         }
         let battle = &loaded.battle;
         let t = self.t;
@@ -1157,7 +1204,8 @@ impl ReplayViewer {
                 out = Some(loaded.view3d.as_mut().unwrap().show(ui, &input));
                 let size = top_bar_size(full.width() - 16.0);
                 let bar = egui::Rect::from_center_size(egui::pos2(full.center().x, full.top() + 6.0 + size.y / 2.0), size);
-                top_bar(&ui.painter_at(full), bar, battle, t);
+                top_bar(&ui.painter_at(full), bar, battle, t, Some(&self.shot_stats));
+                ui.interact(bar, egui::Id::unique("top_bar_stats"), egui::Sense::hover()).on_hover_text(TOP_STATS_HELP);
                 capture_bar(&ui.painter_at(full), bar, &captures, battle.recorder_team);
                 if self.settings.corner_minimap {
                     let size = (full.width().min(full.height()) * 0.32).max(160.0);
@@ -1180,7 +1228,8 @@ impl ReplayViewer {
                 }
                 let (bar, _) = ui.allocate_exact_size(top_bar_size(ui.available_width()), egui::Sense::hover());
                 let bar = egui::Rect::from_center_size(egui::pos2(ui.max_rect().center().x, bar.center().y), bar.size());
-                top_bar(ui.painter(), bar, battle, t);
+                top_bar(ui.painter(), bar, battle, t, Some(&self.shot_stats));
+                ui.interact(bar, egui::Id::unique("top_bar_stats"), egui::Sense::hover()).on_hover_text(TOP_STATS_HELP);
                 ui.vertical_centered(|ui| {
                     out = Some(loaded.view.show(ui, &input));
                 });
