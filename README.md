@@ -135,6 +135,9 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 Nothing open.
 
 ### Done
+- Website lists update themselves (user: "especially when a live battle ends"): the battle list refreshes quietly
+  every 10 s (no spinner; a failed refresh keeps what is shown), the live list every 5 s (was 15), and when a live
+  battle ends the battle list reloads at once (tested in a browser: in the list within 0.5 s of the end)
 - Security review (user), all points: per-visitor limits instead of server-wide caps one person could use up
   ("split to ppl"); viewing codes can't be guessed; shared game data voted on (first upload served, the copy most
   apps' keys vote for wins; user's idea, with spam limits); operator page `/admin` (delete battles, a player's own

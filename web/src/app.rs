@@ -20,7 +20,10 @@ const CODES_KEY: &str = "livereplay.codes";
 /// Live battles: how often new data is fetched (only what is new: small), and the live list
 /// refreshed. Fetching often keeps the delay the viewer needs (see `live_pace`) small.
 const POLL_SECS: f64 = 1.0;
-const LIVE_LIST_SECS: f64 = 15.0;
+const LIVE_LIST_SECS: f64 = 5.0;
+/// The battle list refreshes itself this often while it is shown (and at once when a live
+/// battle ends, so it appears there).
+const LIST_SECS: f64 = 10.0;
 
 fn storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok()?
@@ -249,6 +252,9 @@ pub struct WebApp {
     next_live: f64,
     list: Option<BattleList>,
     list_loading: bool,
+    /// The list being loaded is an automatic refresh: no spinner, and a failure keeps the old list.
+    list_quiet: bool,
+    next_list: f64,
     list_error: Option<String>,
     player: String,
     page: usize,
@@ -283,6 +289,8 @@ impl WebApp {
             next_live: 0.0,
             list: None,
             list_loading: false,
+            list_quiet: false,
+            next_list: 0.0,
             list_error: None,
             player: String::new(),
             page: 0,
@@ -308,6 +316,8 @@ impl WebApp {
 
     fn load_list(&mut self, ctx: &egui::Context) {
         self.list_loading = true;
+        self.list_quiet = false;
+        self.next_list = ctx.input(|i| i.time) + LIST_SECS;
         let url = format!("/api/battles?page={}&player={}", self.page, js_sys::encode_uri_component(&self.player));
         fetch::get(ctx, url, String::new(), self.tx.clone(), |r| {
             Ev::List(r.and_then(|r| if r.ok() { serde_json::from_slice(&r.body).map_err(|e| e.to_string()) } else { Err(r.text()) }))
@@ -411,11 +421,19 @@ impl WebApp {
                 self.list_loading = false;
                 match r {
                     Ok(l) => {
+                        // A battle shown as live that is in the list now has ended: the live
+                        // list is out of date.
+                        if l.battles.iter().any(|b| self.live.iter().any(|x| x.id == b.id)) {
+                            self.next_live = 0.0;
+                        }
                         self.list = Some(l);
                         self.list_error = None;
                     }
+                    // A failed automatic refresh keeps what is shown (tried again soon).
+                    Err(_) if self.list_quiet && self.list.is_some() => {}
                     Err(e) => self.list_error = Some(e),
                 }
+                self.list_quiet = false;
             }
             Ev::Live(r) => {
                 self.live_loading = false;
@@ -424,6 +442,10 @@ impl WebApp {
                     self.codes.retain(|c| l.valid.iter().any(|v| v.code == *c));
                     self.save_codes();
                     self.code_names = l.valid.iter().map(|v| (v.code.clone(), v.player.clone())).collect();
+                    // A live battle that ended is in the battle list now: show it right away.
+                    if self.live.iter().any(|old| !l.battles.iter().any(|b| b.id == old.id)) {
+                        self.next_list = 0.0;
+                    }
                     self.live = l.battles;
                 }
             }
@@ -571,6 +593,14 @@ impl WebApp {
             self.next_live = t + LIVE_LIST_SECS;
             self.load_live(ctx);
         }
+        // Keep the list current (new and just-ended battles), quietly.
+        if t >= self.next_list && !self.list_loading && self.filter_changed_at.is_none() && self.list.is_some() {
+            self.load_list(ctx);
+            self.list_quiet = true;
+        }
+        // Wake up for whichever refresh is due next.
+        let next = if self.codes.is_empty() { self.next_list } else { self.next_list.min(self.next_live) };
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64((next - t).clamp(0.2, LIST_SECS)));
         if let Some(at) = self.filter_changed_at {
             if t - at > 0.4 {
                 self.filter_changed_at = None;
@@ -579,9 +609,6 @@ impl WebApp {
             } else {
                 ctx.request_repaint_after(std::time::Duration::from_millis(100));
             }
-        }
-        if !self.codes.is_empty() {
-            ctx.request_repaint_after(std::time::Duration::from_secs(5));
         }
         let mut open: Option<String> = None;
         egui::Panel::top("web_top").show(ui, |ui| {
@@ -654,7 +681,7 @@ impl WebApp {
                     if ui.add(egui::TextEdit::singleline(&mut self.player).hint_text("Player").desired_width(160.0)).changed() {
                         self.filter_changed_at = Some(ui.input(|i| i.time));
                     }
-                    if self.list_loading {
+                    if self.list_loading && !self.list_quiet {
                         ui.spinner();
                     }
                 });
