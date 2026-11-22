@@ -34,12 +34,14 @@ fn main() {
         let r = agent.put(&format!("{server}/api/assets/{name}")).query("version", "1").header(KEY_HEADER, &key).send(&body[..]).unwrap();
         println!("asset {name}: {}", r.status());
     }
-    let nb = NewBattle { player: "synth_tester".into(), realm: "EU".into(), map: map.into(), map_display: "Synthetic".into(), live: true, arena_id: 4242, ..Default::default() };
+    // SYNTHLIVE_PLAYER / SYNTHLIVE_KEY: a second uploader of the same battle (multi-POV tests).
+    let player = std::env::var("SYNTHLIVE_PLAYER").unwrap_or_else(|_| "synth_tester".into());
+    let nb = NewBattle { player: player.clone(), realm: "EU".into(), map: map.into(), map_display: "Synthetic".into(), live: true, arena_id: 4242, ..Default::default() };
     let info: BattleInfo = agent.post(&format!("{server}/api/battles")).header(KEY_HEADER, &key).send_json(&nb).unwrap().body_mut().read_json().unwrap();
     let code: CodeInfo = agent.post(&format!("{server}/api/codes")).header(KEY_HEADER, &key).send_json(NewCode { days: 1 }).unwrap().body_mut().read_json().unwrap();
     println!("battle {server}/b/{}\ncode {}", info.id, code.code);
 
-    let mut b = Battle { map: map.into(), map_display: "Synthetic".into(), gameplay: "ctf".into(), player_name: "synth_tester".into(), server_realm: "EU".into(), live: true, arena_id: 4242, recorder_vehicle: Some(1), ..Default::default() };
+    let mut b = Battle { map: map.into(), map_display: "Synthetic".into(), gameplay: "ctf".into(), player_name: player.clone(), server_realm: "EU".into(), live: true, arena_id: 4242, recorder_vehicle: Some(1), ..Default::default() };
     for i in 0..10 {
         b.vehicles.insert(
             i + 1,

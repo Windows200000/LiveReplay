@@ -135,6 +135,10 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 Nothing open.
 
 ### Done
+- Finished battles always merge every viewpoint (user): opening one merges all uploads of it; when a live battle
+  ends while watched, the viewpoints that are public now (also the other team's) are merged in, and the others are
+  fetched for two more minutes so their last part arrives. Unticking one keeps it off. Tested in a browser (finished:
+  both merged at once; live with one team's code: the other merged right at the end)
 - Live multi-POV by team (user): while a battle is live, a viewing code of one player also shows the viewpoints of
   teammates who upload it live, never the other team's; with codes from players of both teams, both sides. Opening a
   live battle merges every viewpoint the codes show (also ones that start later, checked every 10 s; one turned off

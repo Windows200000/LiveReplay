@@ -213,8 +213,11 @@ struct Open {
     /// Per other viewpoint: (generation, bytes read), for fetching only what is new while live.
     other_pos: HashMap<String, (u32, u64)>,
     other_polling: std::collections::HashSet<String>,
-    /// Viewpoints the user turned off (a live battle merges every viewpoint it may show).
+    /// Viewpoints the user turned off (every viewpoint that may be shown is merged in).
     turned_off: std::collections::HashSet<String>,
+    /// After a live battle ended: other viewpoints are still fetched until then (their last
+    /// part, and the other team's, which are public now).
+    tail_until: f64,
     /// While live: look again for players who recorded this battle too.
     next_group: f64,
 }
@@ -374,6 +377,7 @@ impl WebApp {
             other_polling: Default::default(),
             next_group: 0.0,
             turned_off: Default::default(),
+            tail_until: 0.0,
         });
         for other in self.open.as_ref().map(|o| o.shown.clone()).unwrap_or_default() {
             self.fetch_other(ctx, &other);
@@ -487,12 +491,12 @@ impl WebApp {
                 let Some(o) = self.open.as_mut().filter(|o| o.serial == s) else { return };
                 if let Ok(l) = r {
                     o.members = l.battles.into_iter().filter(|b| b.id != o.id).collect();
-                    // While live, every viewpoint the codes show is merged in: the server shows
-                    // a live one only with a code of that player or of a teammate who uploaded it
-                    // too (never with the other team's codes alone), so with codes from both
-                    // teams both sides are merged.
-                    if o.live {
-                        let new: Vec<String> = o.members.iter().filter(|m| m.live && !o.shown.contains(&m.id) && !o.turned_off.contains(&m.id)).map(|m| m.id.clone()).collect();
+                    // Every viewpoint that may be shown is merged in: a finished battle's are all
+                    // public; while live the server shows one only with a code of that player or
+                    // of a teammate who uploads it too (never with the other team's codes alone),
+                    // so with codes from both teams both sides are merged.
+                    {
+                        let new: Vec<String> = o.members.iter().filter(|m| !o.shown.contains(&m.id) && !o.turned_off.contains(&m.id)).map(|m| m.id.clone()).collect();
                         for id in new {
                             o.shown.push(id.clone());
                             if !o.others.contains_key(&id) {
@@ -580,6 +584,14 @@ impl WebApp {
                     if was_live && finished {
                         let _ = o.vtx.send(Msg::Finished);
                     }
+                }
+                if was_live && finished {
+                    // Now every viewpoint is public: look again at once, and keep fetching the
+                    // others for a while (they finish a moment later).
+                    let t = ctx.input(|i| i.time);
+                    o.tail_until = t + 120.0;
+                    o.next_group = 0.0;
+                    o.next_poll = t;
                 }
             }
         }
@@ -775,10 +787,16 @@ impl WebApp {
         let icons_done = self.icons_state == 2;
         let mut back = false;
         let Some(o) = self.open.as_mut() else { return };
-        if o.live && o.data_done && !o.polling && t >= o.next_poll {
-            o.polling = true;
+        let tail = !o.live && t < o.tail_until;
+        if (o.live || tail) && o.data_done && !o.polling && t >= o.next_poll {
             let serial = o.serial;
-            fetch::get(ctx, format!("/api/battles/{}/data?gen={}&from={}", o.id, o.gen, o.offset), codes.clone(), self.tx.clone(), move |r| Ev::Data(serial, r));
+            if o.live {
+                o.polling = true;
+                fetch::get(ctx, format!("/api/battles/{}/data?gen={}&from={}", o.id, o.gen, o.offset), codes.clone(), self.tx.clone(), move |r| Ev::Data(serial, r));
+            } else {
+                // The battle itself is complete; only the others are still coming in.
+                o.next_poll = t + 3.0;
+            }
             // The other viewpoints shown: only what is new.
             for id in o.shown.clone() {
                 if o.others.contains_key(&id) && o.other_polling.insert(id.clone()) {
@@ -798,7 +816,7 @@ impl WebApp {
                 }
             }
         }
-        if o.live {
+        if o.live || tail {
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
         egui::Panel::top("viewer_nav").show(ui, |ui| {
