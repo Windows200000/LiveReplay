@@ -17,8 +17,9 @@ use livereplay_api::*;
 use crate::fetch::{self, Reply};
 
 const CODES_KEY: &str = "livereplay.codes";
-/// Live battles: how often new data is fetched, and the live list refreshed.
-const POLL_SECS: f64 = 3.0;
+/// Live battles: how often new data is fetched (only what is new: small), and the live list
+/// refreshed. Fetching often keeps the delay the viewer needs (see `live_pace`) small.
+const POLL_SECS: f64 = 1.0;
 const LIVE_LIST_SECS: f64 = 15.0;
 
 fn storage() -> Option<web_sys::Storage> {

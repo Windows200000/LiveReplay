@@ -125,6 +125,24 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 Nothing open.
 
 ### Done
+- Security review (user), all points: per-visitor limits instead of server-wide caps one person could use up
+  ("split to ppl"); viewing codes can't be guessed; shared game data voted on (first upload served, the copy most
+  apps' keys vote for wins; user's idea, with spam limits); operator page `/admin` (delete battles, a player's own
+  uploads or every battle they are in, block keys, game data); admin player delete only removes that player's own
+  uploads unless asked (user); uploads/downloads streamed from disk for the small shared server (2 OCPU / 4 GB);
+  public lists cached, very high rate limit (user); Debian trixie images, Caddy always newest 2.x
+- App: "Show my battles on the server" with Delete per battle (matched by player name, so also uploads from an
+  older key; user); deleting all data gives the PC a new upload key and says whom to write to when the name is
+  taken (the server's `OPERATOR_CONTACT`, also in the server's error message); the app votes for its own copy of map
+  / 3D data (once per game version; map packs now built in a fixed order so copies compare equal)
+- Live battles on the website no longer freeze and jump (user): playback stays just far enough behind the newest
+  data that the next chunk arrives in time, learnt from how far apart chunks arrive, reached by playing a few percent
+  faster/slower (no jumps); the app uploads every 2 s (was 4) and the website fetches every second (was 3), so the
+  delay settles at a few seconds. Also for the desktop live view
+- Dependencies current, `cargo audit` clean (user): egui/eframe 0.37 (glow kept for 3D), ureq 3, sha2 0.11,
+  getrandom 0.4, blowfish 0.10, directories 6, brotli 9; self-update refuses releases without GitHub's SHA-256 digest
+  and downloads from anywhere but this repo's releases; `web/build.sh` checks the wasm-bindgen download against
+  pinned checksums
 - No duplicates on manual upload (user): the same battle for the same player (same game battle id, or the same replay
   file) is one entry whatever uploader key sends it; the key that owns the player name takes the entry over (the
   duplicate found on wot.arne.my was one replay file uploaded by an old and a new key). Existing duplicates are merged

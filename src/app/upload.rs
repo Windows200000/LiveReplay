@@ -16,7 +16,7 @@ use crate::viewer::player::native::{get_engine, Engine};
 
 /// How often the live battle is sent, and how much of the previous part is sent again
 /// (shots and hits are completed a little after they start).
-const LIVE_EVERY: Duration = Duration::from_secs(4);
+const LIVE_EVERY: Duration = Duration::from_secs(2);
 const LIVE_OVERLAP: f32 = 2.0;
 /// After a live battle the game writes the final replay; wait this long for it.
 const FINAL_WAIT: Duration = Duration::from_secs(120);
@@ -138,7 +138,7 @@ fn checked(r: Result<Resp, ureq::Error>) -> Result<Resp, NetErr> {
 
 fn err(e: NetErr) -> String {
     match e {
-        NetErr::Status(code, msg) => format!("server error {code}{}", if msg.is_empty() || msg.len() > 120 { String::new() } else { format!(": {msg}") }),
+        NetErr::Status(code, msg) => format!("server error {code}{}", if msg.is_empty() || msg.len() > 300 { String::new() } else { format!(": {msg}") }),
         // Full details in the hover text of the status line; keep the message short.
         NetErr::Transport => "can't reach wot.arne.my (offline, or the server is down)".to_string(),
     }
@@ -180,6 +180,30 @@ pub fn delete_my_data(key: &str) -> Result<usize, String> {
     Ok(n)
 }
 
+/// The battles on the server that belong to this PC's player names (also those an older key of
+/// the same player uploaded), newest first.
+pub fn my_battles(key: &str) -> Result<Vec<BattleInfo>, String> {
+    let r = checked(agent().get(&format!("{}/api/me", server_url())).header(api::KEY_HEADER, key).call()).map_err(err)?;
+    Ok(json::<api::MyData>(r)?.battles)
+}
+
+/// Delete one battle from the server by its id.
+pub fn delete_battle(key: &str, id: &str) -> Result<(), String> {
+    checked(agent().delete(&format!("{}/api/battles/{id}", server_url())).header(api::KEY_HEADER, key).call()).map_err(err)?;
+    let mut m = uploaded();
+    m.retain(|_, v| v != id);
+    if let (Some(p), Ok(b)) = (uploads_path(), serde_json::to_vec(&m)) {
+        let _ = std::fs::write(p, b);
+    }
+    Ok(())
+}
+
+/// The server operator's contact (for "this player name belongs to another uploader").
+pub fn server_contact() -> Result<String, String> {
+    let r = checked(agent().get(&format!("{}/api/info", server_url())).call()).map_err(err)?;
+    Ok(json::<api::ServerInfo>(r)?.contact)
+}
+
 /// Delete one uploaded replay from the server.
 pub fn delete_upload(key: &str, file_name: &str) -> Result<(), String> {
     let mut m = uploaded();
@@ -205,6 +229,16 @@ pub fn revoke_code(key: &str, code: &str) -> Result<(), String> {
 }
 
 /// Replay file name -> battle id on the server.
+/// Shared game data this PC voted for, with a vote that counted: name -> (version, hash). Such
+/// an asset isn't looked at again until the game version changes.
+fn votes_path() -> Option<PathBuf> {
+    crate::dirs::config_dir().map(|d| d.join("asset-votes.json"))
+}
+
+fn load_votes() -> HashMap<String, (String, String)> {
+    votes_path().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
 fn uploads_path() -> Option<PathBuf> {
     crate::dirs::config_dir().map(|d| d.join("uploads.json"))
 }
@@ -246,7 +280,7 @@ impl Uploader {
         let status = Arc::new(Mutex::new(Status::default()));
         let live = Arc::new(AtomicBool::new(cfg.upload_live));
         let (st, lv) = (status.clone(), live.clone());
-        std::thread::spawn(move || Worker { cfg, status: st, live: lv, checked: HashSet::new(), current: None, last_archive: Instant::now(), pending: load_pending() }.run(rx));
+        std::thread::spawn(move || Worker { cfg, status: st, live: lv, checked: HashSet::new(), votes: load_votes(), current: None, last_archive: Instant::now(), pending: load_pending() }.run(rx));
         Uploader { jobs: tx, status, live }
     }
 
@@ -263,7 +297,7 @@ impl Uploader {
 
 /// Upload replays right now on this thread (command line `--upload`); the web link of each.
 pub fn upload_files(cfg: &Config, paths: &[PathBuf]) -> Vec<Result<String, String>> {
-    let mut w = Worker { cfg: cfg.clone(), status: Default::default(), live: Default::default(), checked: HashSet::new(), current: None, last_archive: Instant::now(), pending: load_pending() };
+    let mut w = Worker { cfg: cfg.clone(), status: Default::default(), live: Default::default(), checked: HashSet::new(), votes: load_votes(), current: None, last_archive: Instant::now(), pending: load_pending() };
     paths.iter().map(|p| w.upload_replay(p, None).map(|id| battle_link(&id))).collect()
 }
 
@@ -289,6 +323,8 @@ struct Worker {
     live: Arc<AtomicBool>,
     /// Assets already checked this session.
     checked: HashSet<String>,
+    /// Assets voted for with a vote that counted (see [`votes_path`]).
+    votes: HashMap<String, (String, String)>,
     current: Option<LiveUpload>,
     last_archive: Instant,
     /// Uploads waiting for their battle results.
@@ -352,25 +388,76 @@ impl Worker {
         get_engine(None, &self.cfg.game_dir)
     }
 
+    /// What the server serves for an asset: `None` if it has none, else (version, hash).
+    fn asset_head(name: &str) -> Result<Option<(String, String)>, NetErr> {
+        match checked(agent().head(&format!("{}/api/assets/{name}", server_url())).call()) {
+            Ok(r) => Ok(Some((header(&r, api::VERSION_HEADER).unwrap_or_default(), header(&r, api::HASH_HEADER).unwrap_or_default()))),
+            Err(NetErr::Status(404, _)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Whether this PC already voted for this asset with this game version.
+    fn voted(&self, name: &str, version: &str) -> bool {
+        self.votes.get(name).is_some_and(|(v, _)| v == version)
+    }
+
+    /// Give the server our copy of an asset (made from this PC's game files): uploaded if the
+    /// server lacks it, otherwise just a vote for it. The server serves the copy most apps agree
+    /// on, so garbage someone uploaded first doesn't stay.
+    fn sync_asset(&mut self, name: &str, version: &str, head: Option<(String, String)>, body: Vec<u8>) -> Result<(), String> {
+        // Data from an older game version than the server's: no vote (it would be out of date).
+        if let Some((v, _)) = &head {
+            if crate::app::update::newer(v, version) {
+                return Ok(());
+            }
+        }
+        let hash = crate::net::sha256_hex(&body);
+        let url = format!("{}/api/assets/{name}", server_url());
+        let put = |url: &str| checked(agent().put(url).query("version", version).header(api::KEY_HEADER, &self.cfg.upload_key).send(&body[..])).map_err(err);
+        let mut res: api::AssetVote = if head.is_none() {
+            json(put(&url)?)?
+        } else {
+            let r = checked(agent().post(&format!("{url}/vote")).query("version", version).query("hash", &hash).header(api::KEY_HEADER, &self.cfg.upload_key).send_empty());
+            match r {
+                Ok(r) => json(r)?,
+                // An older server without votes: it takes the upload (or keeps its copy).
+                Err(NetErr::Status(404 | 405, _)) => {
+                    let _ = put(&url);
+                    api::AssetVote::default()
+                }
+                Err(e) => return Err(err(e)),
+            }
+        };
+        if res.upload {
+            res = json(put(&url)?)?;
+        }
+        if res.counted {
+            self.votes.insert(name.to_string(), (version.to_string(), hash));
+            if let (Some(p), Ok(b)) = (votes_path(), serde_json::to_vec(&self.votes)) {
+                if let Some(d) = p.parent() {
+                    let _ = std::fs::create_dir_all(d);
+                }
+                let _ = std::fs::write(p, b);
+            }
+        }
+        Ok(())
+    }
+
     fn ensure_assets(&mut self, engine: &Engine, map: &str, version: &str) -> Result<(), String> {
         let version = api::asset_version(version);
         let version = version.as_str();
         for name in [api::map_asset(map), crate::net::ICONS_ASSET.to_string()] {
-            if !self.checked.insert(name.clone()) {
+            if self.voted(&name, version) || !self.checked.insert(name.clone()) {
                 continue;
             }
-            let url = format!("{}/api/assets/{name}", server_url());
-            let have = match checked(agent().head(&url).call()) {
-                Ok(r) => header(&r, api::VERSION_HEADER),
-                Err(NetErr::Status(404, _)) => None,
+            let head = match Self::asset_head(&name) {
+                Ok(h) => h,
                 Err(e) => {
                     self.checked.remove(&name);
                     return Err(err(e));
                 }
             };
-            if have.as_deref() == Some(version) {
-                continue;
-            }
             let body = if name == crate::net::ICONS_ASSET {
                 crate::net::encode_pack(&crate::net::icon_pack(&engine.game))
             } else {
@@ -379,13 +466,9 @@ impl Worker {
                     None => continue,
                 }
             };
-            match checked(agent().put(&url).query("version", version).header(api::KEY_HEADER, &self.cfg.upload_key).send(&body[..])) {
-                // Another uploader maintains this asset: theirs stays.
-                Ok(_) | Err(NetErr::Status(403, _)) => {}
-                Err(e) => {
-                    self.checked.remove(&name);
-                    return Err(err(e));
-                }
+            if let Err(e) = self.sync_asset(&name, version, head, body) {
+                self.checked.remove(&name);
+                return Err(e);
             }
         }
         Ok(())
@@ -491,35 +574,22 @@ impl Worker {
         // What the server lacks; announced first, so web viewers waiting for it show progress.
         let mut todo = Vec::new();
         for (name, make) in wanted {
-            if self.checked.contains(&name) {
+            if self.checked.contains(&name) || self.voted(&name, version) {
                 continue;
             }
-            let url = format!("{}/api/assets/{name}", server_url());
-            let have = match checked(agent().head(&url).call()) {
-                Ok(r) => header(&r, api::VERSION_HEADER),
-                Err(NetErr::Status(404, _)) => None,
-                Err(e) => return Err(err(e)),
-            };
-            if have.as_deref() == Some(version) {
-                self.checked.insert(name);
-            } else {
-                todo.push((name, make));
-            }
+            let head = Self::asset_head(&name).map_err(err)?;
+            todo.push((name, make, head));
         }
-        if !todo.is_empty() {
-            let names: Vec<&String> = todo.iter().map(|(n, _)| n).collect();
-            let _ = agent().post(&format!("{}/api/asset-expect", server_url())).header(api::KEY_HEADER, &self.cfg.upload_key).send_json(&names);
+        // The ones the server lacks are announced first (web viewers waiting for them show it).
+        let missing: Vec<&String> = todo.iter().filter(|t| t.2.is_none()).map(|t| &t.0).collect();
+        if !missing.is_empty() {
+            let _ = agent().post(&format!("{}/api/asset-expect", server_url())).header(api::KEY_HEADER, &self.cfg.upload_key).send_json(&missing);
         }
-        for (name, make) in todo {
-            let url = format!("{}/api/assets/{name}", server_url());
-            {
-                if let Some(body) = make() {
-                    match checked(agent().put(&url).query("version", version).header(api::KEY_HEADER, &self.cfg.upload_key).send(&body[..])) {
-                        // Another uploader maintains this asset: theirs stays.
-                        Ok(_) | Err(NetErr::Status(403, _)) => {}
-                        Err(e) => return Err(err(e)),
-                    }
-                }
+        // Missing ones first: viewers may be waiting for them.
+        todo.sort_by_key(|t| t.2.is_some());
+        for (name, make, head) in todo {
+            if let Some(body) = make() {
+                self.sync_asset(&name, version, head, body)?;
             }
             self.checked.insert(name);
         }
@@ -562,6 +632,7 @@ impl Worker {
                             status: self.status.clone(),
                             live: self.live.clone(),
                             checked: HashSet::new(),
+                            votes: load_votes(),
                             current: None,
                             last_archive: Instant::now(),
                             pending: Vec::new(),
@@ -715,4 +786,49 @@ fn file_name(p: &Path) -> String {
 /// The list summary of a replay, or of the battle in progress (no header yet).
 fn entry(engine: &Engine, path: &Path, b: &Battle) -> Option<super::library::ReplayEntry> {
     super::library::summarize(path, Some(&engine.game)).or_else(|| b.live.then(|| super::library::live_entry(path, b, &engine.game)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Against a running server (`LIVEREPLAY_SERVER`, with `LIVEREPLAY_HOME` set to a scratch
+    /// folder): garbage uploaded first is replaced once a real app votes for its own copy, and
+    /// its counted vote is remembered.
+    #[test]
+    #[ignore]
+    fn asset_votes_against_server() {
+        let worker = |key: &str| Worker {
+            cfg: Config { upload_key: key.into(), ..Default::default() },
+            status: Default::default(),
+            live: Default::default(),
+            checked: HashSet::new(),
+            votes: HashMap::new(),
+            current: None,
+            last_archive: Instant::now(),
+            pending: Vec::new(),
+        };
+        let (a, c) = ("a".repeat(40), "c".repeat(40));
+        // A has a real battle with data (so its vote counts); C has none.
+        let nb = NewBattle { player: "Alice".into(), realm: "EU".into(), map: "m".into(), arena_id: 5, live: true, ..Default::default() };
+        let info: BattleInfo = post_json(&a, "/api/battles", &nb).unwrap();
+        post_bytes(&a, &format!("/api/battles/{}/frames", info.id), &[1, 0, 0, 0, 7]).unwrap();
+        let (garbage, good) = (b"garbage".to_vec(), b"the real map".to_vec());
+        let mut wc = worker(&c);
+        wc.sync_asset("map-m", "1.0", Worker::asset_head("map-m").unwrap_or(None), garbage).unwrap();
+        assert!(wc.votes.is_empty(), "C's vote doesn't count");
+        let mut wa = worker(&a);
+        let head = Worker::asset_head("map-m").unwrap_or(None);
+        assert!(head.is_some());
+        wa.sync_asset("map-m", "1.0", head, good.clone()).unwrap();
+        assert!(wa.voted("map-m", "1.0"));
+        let (_, hash) = Worker::asset_head("map-m").unwrap_or(None).unwrap();
+        assert_eq!(hash, crate::net::sha256_hex(&good), "A's copy is served now");
+        assert!(load_votes().contains_key("map-m"));
+        // Single battles: listed and deleted by id.
+        assert_eq!(my_battles(&a).unwrap().len(), 1);
+        delete_battle(&a, &info.id).unwrap();
+        assert!(my_battles(&a).unwrap().is_empty());
+        assert!(server_contact().is_ok());
+    }
 }

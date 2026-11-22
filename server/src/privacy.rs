@@ -78,7 +78,8 @@ from the player who uploads it.</p>
 (Art. 15-21 GDPR), and to complain to a data protection supervisory authority.</p>
 <ul>
 <li><b>Uploaders:</b> in the LiveReplay app, Settings &gt; Server: <i>Download my server data</i> and <i>Delete all my data
-on the server</i>; single battles: right-click a replay &gt; <i>Delete from server</i>.</li>
+on the server</i> (also gives the app a new upload key); single battles: <i>Show my battles on the server</i> &gt;
+<i>Delete</i>, or right-click a replay &gt; <i>Delete from server</i>.</li>
 <li><b>Players in someone else's upload:</b> write to {contact_html} with your player name and server (e.g. EU).
 All battles containing your name are removed, usually within a few days and at the latest within one month.</li>
 <li><b>Someone else uploads under your player name</b> (the app says the name "belongs to another uploader"): write to

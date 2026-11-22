@@ -39,7 +39,7 @@ mod privacy;
 use assets::{AssetMeta, Copy};
 use guard::{Daily, Guard, Visitor};
 
-/// A live battle not updated for this long is no longer live (the app sends every 4 s; it
+/// A live battle not updated for this long is no longer live (the app sends every 2 s; it
 /// crashed, was closed, or the battle ended without a final upload).
 const STALE_SECS: u64 = 90;
 const MAX_BODY: usize = 16 << 20;

@@ -95,6 +95,8 @@ pub struct ReplayViewer {
     settings: ViewerSettings,
     /// Live mode: `Some(true)` while following the newest moment.
     live_follow: Option<bool>,
+    /// How far behind the newest data a live battle plays (learnt from how data arrives).
+    pace: super::live_pace::LivePace,
     live_ended: bool,
     /// Open at this many seconds after battle start instead of the beginning.
     pub start_at: Option<f32>,
@@ -647,6 +649,7 @@ impl ReplayViewer {
             pinned: None,
             settings: ViewerSettings::load(),
             live_follow: live.then_some(true),
+            pace: Default::default(),
             live_ended: false,
             start_at: None,
             autoplay: false,
@@ -743,14 +746,17 @@ impl ReplayViewer {
                 self.notice3d = None;
             }
         }
+        let now = ctx.input(|i| i.time);
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Msg::Loaded(loaded, assets) => {
                     let start_at = self.start_at.take();
+                    self.pace = Default::default();
                     self.t = if let Some(at) = start_at {
                         (loaded.battle.battle_start() + at).clamp(0.0, loaded.battle.duration)
                     } else if self.live_follow.is_some() {
-                        (loaded.battle.duration - 1.0).max(0.0)
+                        // A little behind the newest data, so the next chunk is there in time.
+                        self.pace.start(loaded.battle.duration as f64, now) as f32
                     } else {
                         // Start at the end of the pre-battle countdown.
                         (loaded.battle.battle_start() - 3.0).max(0.0)
@@ -798,12 +804,11 @@ impl ReplayViewer {
                 Msg::Update(battle) => {
                     if let Some(l) = self.loaded.as_mut() {
                         l.battle = battle;
+                        if self.live_follow.is_some() {
+                            self.pace.arrived(l.battle.duration as f64, now);
+                        }
                         if self.live_follow == Some(true) {
-                            // Stay ~1s behind the newest packet so movement stays smooth.
-                            let newest = l.battle.duration;
-                            if (newest - self.t).abs() > 3.0 {
-                                self.t = (newest - 1.0).max(0.0);
-                            }
+                            // No jump: playback keeps going and paces itself (see `advance`).
                             self.playing = true;
                         }
                     }
@@ -854,8 +859,12 @@ impl ReplayViewer {
             self.playing = !self.playing;
         }
         if self.playing {
-            let speed = if self.live_follow == Some(true) { 1.0 } else { self.settings.speed };
-            self.t += dt * speed;
+            if self.live_follow == Some(true) {
+                // Real time, slightly faster or slower to stay just behind the newest data.
+                self.t = self.pace.advance(self.t as f64, dt as f64, loaded.battle.duration as f64) as f32;
+            } else {
+                self.t += dt * self.settings.speed;
+            }
             if self.t >= loaded.battle.duration {
                 self.t = loaded.battle.duration;
                 if self.live_follow.is_none() {
@@ -910,10 +919,11 @@ impl ReplayViewer {
                     if self.live_ended {
                         ui.label(RichText::new("Battle ended - waiting for the next one").color(Color32::from_gray(170)));
                     } else if follow {
-                        ui.label(RichText::new("LIVE").strong().color(Color32::from_rgb(255, 70, 60)));
+                        ui.label(RichText::new("LIVE").strong().color(Color32::from_rgb(255, 70, 60)))
+                            .on_hover_text(format!("{:.0} s behind the game, so the data arrives in time", (battle.duration - self.t).max(0.0)));
                     } else if ui.button("Go live").clicked() {
                         self.live_follow = Some(true);
-                        self.t = (battle.duration - 1.0).max(0.0);
+                        self.t = (battle.duration as f64 - self.pace.delay()).max(0.0) as f32;
                         self.playing = true;
                     }
                 }

@@ -48,6 +48,11 @@ pub struct App {
     consent_first: bool,
     /// "Delete all my data" was clicked once (asks again before deleting).
     confirm_delete: bool,
+    /// Settings: this PC's battles on the server (loaded on request), for deleting single ones.
+    my_battles: Option<Vec<crate::net::api::BattleInfo>>,
+    /// The server operator's contact (asked once when the settings are opened).
+    server_contact: Option<String>,
+    contact_rx: Option<mpsc::Receiver<String>>,
     /// New versions (background check, download, install).
     updater: Updater,
     /// The update notice was closed for this state.
@@ -66,6 +71,10 @@ enum CodeOp {
     Revoked(String),
     /// Server data requests (download / delete): message for the user.
     Done(String),
+    /// Everything deleted (this many battles): the PC gets a new upload key.
+    DeletedAll(usize),
+    Battles(Vec<crate::net::api::BattleInfo>),
+    BattleDeleted(String),
 }
 
 /// What uploading means, shown before the first upload (and in Settings).
@@ -105,6 +114,9 @@ impl Default for App {
             in_progress_loading: Default::default(),
             in_progress_checked: -10.0,
             confirm_delete: false,
+            my_battles: None,
+            server_contact: None,
+            contact_rx: None,
             cfg,
             entries: Vec::new(),
             status: String::new(),
@@ -508,7 +520,7 @@ impl App {
                         let (tx, rx) = mpsc::channel();
                         let key = draft.upload_key.clone();
                         std::thread::spawn(move || {
-                            let _ = tx.send(upload::delete_my_data(&key).map(|n| CodeOp::Done(format!("Deleted {n} battles, your codes and player names from the server"))));
+                            let _ = tx.send(upload::delete_my_data(&key).map(CodeOp::DeletedAll));
                         });
                         self.code_rx = Some(rx);
                     } else {
@@ -516,6 +528,68 @@ impl App {
                     }
                 }
             });
+            // Who to write to when the name is taken (asked once per settings window).
+            if self.server_contact.is_none() && self.contact_rx.is_none() {
+                let (tx, rx) = mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = tx.send(upload::server_contact().unwrap_or_default());
+                });
+                self.contact_rx = Some(rx);
+            }
+            if let Some(c) = self.contact_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+                self.server_contact = Some(c);
+            }
+            let contact = self.server_contact.clone().filter(|c| !c.is_empty()).unwrap_or_else(|| "the server operator (see the privacy policy)".into());
+            ui.add(
+                egui::Label::new(
+                    RichText::new(format!(
+                        "Deleting all your data also gives this PC a new upload key, and your player names are free again. \
+                         If the server says your player name belongs to another uploader, write to {contact}."
+                    ))
+                    .small()
+                    .color(Color32::from_gray(150)),
+                )
+                .wrap(),
+            );
+            ui.horizontal(|ui| {
+                let label = if self.my_battles.is_some() { "Refresh my battles on the server" } else { "Show my battles on the server" };
+                if ui.add_enabled(self.code_rx.is_none(), egui::Button::new(label)).on_hover_text("Every battle uploaded for your player names, also from another PC or an older install").clicked() {
+                    let (tx, rx) = mpsc::channel();
+                    let key = draft.upload_key.clone();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(upload::my_battles(&key).map(CodeOp::Battles));
+                    });
+                    self.code_rx = Some(rx);
+                }
+                if self.my_battles.is_some() && ui.button("Hide").clicked() {
+                    self.my_battles = None;
+                }
+            });
+            if let Some(list) = &self.my_battles {
+                if list.is_empty() {
+                    ui.label(RichText::new("No battles on the server.").color(Color32::from_gray(150)));
+                }
+                let mut delete = None;
+                egui::ScrollArea::vertical().id_salt("my_battles").max_height(200.0).show(ui, |ui| {
+                    for b in list {
+                        ui.horizontal(|ui| {
+                            if ui.add_enabled(self.code_rx.is_none(), egui::Button::new(RichText::new("Delete").color(Color32::from_rgb(255, 120, 110))).small()).clicked() {
+                                delete = Some(b.id.clone());
+                            }
+                            ui.hyperlink_to(format!("{}  {}  {}", b.date, b.map_display, b.tank), upload::battle_link(&b.id));
+                            ui.label(RichText::new(format!("{}{}", b.player, if b.live { " (live)" } else { "" })).color(Color32::from_gray(150)));
+                        });
+                    }
+                });
+                if let Some(id) = delete {
+                    let (tx, rx) = mpsc::channel();
+                    let key = draft.upload_key.clone();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(upload::delete_battle(&key, &id).map(|_| CodeOp::BattleDeleted(id)));
+                    });
+                    self.code_rx = Some(rx);
+                }
+            }
             ui.add_space(6.0);
             ui.label("Live viewing codes (let someone watch your battles while you play):");
             ui.horizontal(|ui| {
@@ -566,6 +640,23 @@ impl App {
                     }
                     Ok(CodeOp::Revoked(code)) => draft.codes.retain(|c| c.0 != code),
                     Ok(CodeOp::Done(msg)) => self.code_msg = msg,
+                    Ok(CodeOp::DeletedAll(n)) => {
+                        // A fresh start: a new key (saved with the other settings below).
+                        draft.upload_key = upload::new_key();
+                        draft.codes.clear();
+                        self.my_battles = None;
+                        self.code_msg = format!("Deleted {n} battles, your codes and player names from the server. This PC has a new upload key.");
+                    }
+                    Ok(CodeOp::Battles(list)) => {
+                        self.code_msg.clear();
+                        self.my_battles = Some(list);
+                    }
+                    Ok(CodeOp::BattleDeleted(id)) => {
+                        if let Some(l) = &mut self.my_battles {
+                            l.retain(|b| b.id != id);
+                        }
+                        self.code_msg = "Deleted from the server".into();
+                    }
                     Err(e) => self.code_msg = e,
                 }
                 // Codes are kept right away.
