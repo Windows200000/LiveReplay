@@ -1,3 +1,4 @@
+pub mod live_pace;
 pub mod minimap2d;
 pub mod player;
 pub mod scene;
