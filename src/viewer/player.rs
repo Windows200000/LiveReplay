@@ -421,7 +421,8 @@ pub fn top_bar(painter: &egui::Painter, rect: egui::Rect, b: &Battle, t: f32, st
         let fill = egui::Rect::from_two_pos(egui::pos2(bar_start, track.top()), egui::pos2(bar_start + dir * bar_len * frac, track.bottom()));
         painter.rect_filled(fill, 1.5 * s, col);
 
-        // Damage dealt / blocked / missed beyond the bar: whole battle on top, last minute below.
+        // Damage dealt / blocked / missed beyond the bar (left to right on both sides): whole
+        // battle on top, last minute below.
         if let Some(stats) = stats {
             let team = if ally { b.recorder_team } else { 3 - b.recorder_team.clamp(1, 2) };
             let from = bar_start + dir * (bar_len + 6.0 * s);
@@ -450,7 +451,8 @@ pub fn top_bar(painter: &egui::Painter, rect: egui::Rect, b: &Battle, t: f32, st
                     };
                     let cells = [(fit(tot.dealt, false), col), (fit(tot.blocked.round() as i32, true), blocked_col), (fit(tot.missed.round() as i32, true), missed_col)];
                     for (i, (text, c)) in cells.into_iter().enumerate() {
-                        let x = from + dir * cw * (i as f32 + 0.5);
+                        // Dealt, blocked, missed from left to right on both sides.
+                        let x = from.min(to) + cw * (i as f32 + 0.5);
                         painter.text(egui::pos2(x, y), egui::Align2::CENTER_CENTER, text, font.clone(), c.gamma_multiply(dim));
                     }
                 }
