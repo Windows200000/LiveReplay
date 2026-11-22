@@ -8,7 +8,8 @@
 //!   `group`: every upload of one battle)
 //! - `GET /api/battles/{id}` -> [`BattleInfo`]
 //! - `GET /api/battles/{id}/data?gen=G&from=N` -> frames from byte N (binary). Live battles need a
-//!   viewing code ([`CODES_HEADER`]) or the owner's key. If `gen` is not current, everything is
+//!   viewing code ([`CODES_HEADER`]) or the owner's key, of that player or of a teammate who
+//!   uploads the same battle (both uploads listing each other in [`NewBattle::allies`]). If `gen` is not current, everything is
 //!   sent again; the current generation is in [`GEN_HEADER`].
 //! - `GET /api/live` with [`CODES_HEADER`] -> [`LiveList`]
 //! - `POST /api/codes` K: [`NewCode`] -> [`CodeInfo`];  `DELETE /api/codes/{code}` K
@@ -117,6 +118,11 @@ pub struct NewBattle {
     /// server recognises the same battle by it (one entry per uploader, viewpoints grouped).
     #[serde(default)]
     pub arena_id: u64,
+    /// Names of the players on the uploader's team (the uploader too). While a battle is live,
+    /// a viewing code of one player also shows the viewpoints of teammates who uploaded it, when
+    /// both uploads list each other as teammates (an enemy can't claim to be on the team).
+    #[serde(default)]
+    pub allies: Vec<String>,
     /// Tank (entity) ids known at upload: recordings of the same battle share them, so the
     /// server can group several players' uploads of one battle.
     pub vehicle_ids: Vec<i32>,

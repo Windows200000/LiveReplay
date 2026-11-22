@@ -18,7 +18,7 @@ fn main() -> anyhow::Result<()> {
     let player = std::env::var("FAKELIVE_PLAYER").unwrap_or_else(|_| "live_tester".into());
     let nb = NewBattle { player, realm: full.server_realm.clone(), map: full.map.clone(), map_display: full.map_display.clone(),
         mode: "Test".into(), tank: "Test tank".into(), date: "20.11.2026 12:00:00".into(), version: String::new(), live: true, file_name: String::new(), arena_id: full.arena_id,
-        vehicle_ids: full.vehicles.keys().copied().collect(), players: vec![] };
+        vehicle_ids: full.vehicles.keys().copied().collect(), players: vec![], allies: vec![] };
     let info: BattleInfo = ureq::post(&format!("{server}/api/battles")).header(KEY_HEADER, key).send_json(&nb)?.body_mut().read_json()?;
     let code: CodeInfo = ureq::post(&format!("{server}/api/codes")).header(KEY_HEADER, key).send_json(&NewCode { days: 1 })?.body_mut().read_json()?;
     println!("battle {} code {}", info.id, code.code);

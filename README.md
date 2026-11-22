@@ -135,6 +135,13 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 Nothing open.
 
 ### Done
+- Live multi-POV by team (user): while a battle is live, a viewing code of one player also shows the viewpoints of
+  teammates who upload it live, never the other team's; with codes from players of both teams, both sides. Opening a
+  live battle merges every viewpoint the codes show (also ones that start later, checked every 10 s; one turned off
+  stays off). The app sends its team's names with each upload; a teammate's viewpoint is only shared when both uploads
+  list each other (an enemy in the same battle can't claim to be on the team). Uploads from older apps: own code only.
+  Tested on a local server (teammate shared, enemy with a false claim refused, both teams with both codes, public
+  after the battle)
 - Releases from CI (user): a push to main whose Cargo.toml version has no release yet creates the tag `v<version>`
   and the release with all six builds (so a release is: raise the version, push to main)
 - Button symbols monochrome again, as before the egui 0.37 upgrade (it made the monochrome emoji fonts optional, so

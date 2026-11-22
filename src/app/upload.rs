@@ -490,6 +490,8 @@ impl Worker {
             arena_id: b.arena_id,
             vehicle_ids: b.vehicles.keys().copied().collect(),
             players: b.vehicles.values().map(|v| v.name.clone()).filter(|n| !n.is_empty()).collect(),
+            // Teammates: while live, a viewing code of this player also shows their viewpoints.
+            allies: b.vehicles.values().filter(|v| v.team == b.recorder_team).map(|v| v.name.clone()).filter(|n| !n.is_empty()).collect(),
         };
         post_json(&self.cfg.upload_key, "/api/battles", &nb)
     }

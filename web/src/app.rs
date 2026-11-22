@@ -213,6 +213,8 @@ struct Open {
     /// Per other viewpoint: (generation, bytes read), for fetching only what is new while live.
     other_pos: HashMap<String, (u32, u64)>,
     other_polling: std::collections::HashSet<String>,
+    /// Viewpoints the user turned off (a live battle merges every viewpoint it may show).
+    turned_off: std::collections::HashSet<String>,
     /// While live: look again for players who recorded this battle too.
     next_group: f64,
 }
@@ -371,6 +373,7 @@ impl WebApp {
             other_pos: HashMap::new(),
             other_polling: Default::default(),
             next_group: 0.0,
+            turned_off: Default::default(),
         });
         for other in self.open.as_ref().map(|o| o.shown.clone()).unwrap_or_default() {
             self.fetch_other(ctx, &other);
@@ -484,6 +487,22 @@ impl WebApp {
                 let Some(o) = self.open.as_mut().filter(|o| o.serial == s) else { return };
                 if let Ok(l) = r {
                     o.members = l.battles.into_iter().filter(|b| b.id != o.id).collect();
+                    // While live, every viewpoint the codes show is merged in: the server shows
+                    // a live one only with a code of that player or of a teammate who uploaded it
+                    // too (never with the other team's codes alone), so with codes from both
+                    // teams both sides are merged.
+                    if o.live {
+                        let new: Vec<String> = o.members.iter().filter(|m| m.live && !o.shown.contains(&m.id) && !o.turned_off.contains(&m.id)).map(|m| m.id.clone()).collect();
+                        for id in new {
+                            o.shown.push(id.clone());
+                            if !o.others.contains_key(&id) {
+                                let serial = o.serial;
+                                let other = id.clone();
+                                fetch::get(ctx, format!("/api/battles/{id}/data?gen=0&from=0"), codes.clone(), self.tx.clone(), move |r| Ev::Other(serial, other, r));
+                            }
+                        }
+                        o.push_update();
+                    }
                 }
             }
             Ev::Other(s, id, r) => {
@@ -770,7 +789,8 @@ impl WebApp {
             }
             // Someone else may start uploading this battle while it runs.
             if t >= o.next_group {
-                o.next_group = t + 30.0;
+                // Teammates who start uploading are merged in within seconds.
+                o.next_group = t + 10.0;
                 if let Some(group) = o.info.as_ref().map(|i| if i.group.is_empty() { i.id.clone() } else { i.group.clone() }) {
                     fetch::get(ctx, format!("/api/battles?group={group}"), codes.clone(), self.tx.clone(), move |r| {
                         Ev::Group(serial, r.and_then(|r| if r.ok() { serde_json::from_slice(&r.body).map_err(|e| e.to_string()) } else { Err(r.text()) }))
@@ -806,6 +826,7 @@ impl WebApp {
                             }
                         } else {
                             o.shown.retain(|x| *x != id);
+                            o.turned_off.insert(id.clone());
                         }
                         o.push_update();
                     }

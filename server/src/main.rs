@@ -179,6 +179,10 @@ struct Stored {
     /// The game's arenaUniqueID (0 = unknown): recognises the same battle.
     #[serde(default)]
     arena_id: u64,
+    /// Lower-case names of the uploader's team, as its app reported them (live viewpoints of a
+    /// team are shared with that team's codes, see [`may_watch`]).
+    #[serde(default)]
+    allies: Vec<String>,
 }
 
 /// Files that changed in memory and are written after the request.
@@ -216,6 +220,30 @@ struct Snapshot {
     rows: Vec<(Arc<BattleInfo>, String)>,
     /// Keys whose asset votes may count: they own a player name and uploaded a battle with data.
     voters: HashSet<String>,
+    /// Live viewpoints of grouped battles: group -> members (for team access, see [`may_watch`]).
+    members: HashMap<String, Vec<Member>>,
+}
+
+/// One live upload of a grouped battle.
+struct Member {
+    id: String,
+    owner: String,
+    /// Lower-case player name of the uploader.
+    player: String,
+    allies: Vec<String>,
+}
+
+/// Whether the viewer (who holds codes or keys of `owners`) may watch this upload: finished
+/// battles are public; a live one needs a code from its uploader, or from a teammate who
+/// uploaded the same battle live, if both uploads list each other as teammates. A code from
+/// the other team alone never shows it.
+fn may_watch(snap: &Snapshot, i: &BattleInfo, owner: &str, owners: &[String], t: u64) -> bool {
+    if !info_live(i, t) || owners.iter().any(|o| o == owner) {
+        return true;
+    }
+    let Some(members) = snap.members.get(&i.group) else { return false };
+    let Some(me) = members.iter().find(|m| m.id == i.id) else { return false };
+    members.iter().any(|u| u.id != me.id && owners.contains(&u.owner) && u.allies.contains(&me.player) && me.allies.contains(&u.player))
 }
 
 /// Storage in use, per uploader key and in total.
@@ -597,12 +625,16 @@ impl App {
         if let Some(s) = slot.as_ref().filter(|s| s.epoch == epoch && s.at.elapsed() < SNAPSHOT_AGE) {
             return s.clone();
         }
-        let (mut rows, voters) = {
+        let (mut rows, voters, members) = {
             let st = self.st();
             let rows: Vec<(Arc<BattleInfo>, String)> = st.battles.values().filter(|s| s.info.size > 0).map(|s| (s.info.clone(), s.owner.clone())).collect();
             let claimed: HashSet<&String> = st.claims.values().collect();
             let voters: HashSet<String> = rows.iter().map(|r| &r.1).filter(|k| claimed.contains(k)).cloned().collect();
-            (rows, voters)
+            let mut members: HashMap<String, Vec<Member>> = HashMap::new();
+            for s in st.battles.values().filter(|s| s.info.live && !s.info.group.is_empty()) {
+                members.entry(s.info.group.clone()).or_default().push(Member { id: s.info.id.clone(), owner: s.owner.clone(), player: s.info.player.to_lowercase(), allies: s.allies.clone() });
+            }
+            (rows, voters, members)
         };
         let key = |d: &str| {
             let (day, time) = d.split_once(' ').unwrap_or((d, ""));
@@ -612,7 +644,7 @@ impl App {
             }
         };
         rows.sort_by_cached_key(|r| std::cmp::Reverse(key(&r.0.date)));
-        let s = Arc::new(Snapshot { at: Instant::now(), epoch, rows, voters });
+        let s = Arc::new(Snapshot { at: Instant::now(), epoch, rows, voters, members });
         *slot = Some(s.clone());
         s
     }
@@ -939,9 +971,12 @@ fn route(app: &App, rq: &mut Request, v: Visitor) -> Reply {
         }
         (Method::Get, ["api", "battles"]) => list(app, rq, q, v),
         (Method::Get, ["api", "battles", id]) => {
-            let st = app.st();
-            match st.battles.get(*id) {
-                Some(s) if !is_live(s, now()) || unlocked(app, &st, rq, v).0.contains(&s.owner) => Reply::json(&shown(s, now())),
+            let found = {
+                let st = app.st();
+                st.battles.get(*id).map(|s| (shown(s, now()), (*s.info).clone(), s.owner.clone(), unlocked(app, &st, rq, v).0))
+            };
+            match found {
+                Some((out, info, owner, owners)) if may_watch(&app.snapshot(), &info, &owner, &owners, now()) => Reply::json(&out),
                 _ => Reply::err(404, "not found"),
             }
         }
@@ -1291,6 +1326,8 @@ fn new_battle(app: &App, rq: &mut Request, v: Visitor) -> Reply {
     nb.vehicle_ids.dedup();
     nb.players.truncate(200);
     let players: Vec<String> = nb.players.iter().filter(|p| valid_player(p)).map(|p| p.to_lowercase()).collect();
+    nb.allies.truncate(100);
+    let allies: Vec<String> = nb.allies.iter().filter(|p| valid_player(p)).map(|p| p.to_lowercase()).collect();
     let mut st = app.st();
     // The first key that uploads for a player name owns it.
     let claim = claim_key(&nb.realm, &nb.player);
@@ -1334,6 +1371,10 @@ fn new_battle(app: &App, rq: &mut Request, v: Visitor) -> Reply {
         }
         if s.arena_id == 0 && nb.arena_id != 0 {
             s.arena_id = nb.arena_id;
+            changed = true;
+        }
+        if s.allies.is_empty() && !allies.is_empty() {
+            s.allies = allies.clone();
             changed = true;
         }
         let s = s.clone();
@@ -1419,7 +1460,7 @@ fn new_battle(app: &App, rq: &mut Request, v: Visitor) -> Reply {
         }
         info.group = st.battles[&mate].info.group.clone();
     }
-    let s = Stored { info: Arc::new(info.clone()), owner, created: t, vehicle_ids: nb.vehicle_ids, players, arena_id: nb.arena_id };
+    let s = Stored { info: Arc::new(info.clone()), owner, created: t, vehicle_ids: nb.vehicle_ids, players, arena_id: nb.arena_id, allies };
     app.save_battle(&s);
     st.battles.insert(id, s);
     Reply::json(&info)
@@ -1514,12 +1555,13 @@ fn frames(app: &App, rq: &mut Request, v: Visitor, id: &str, q: &str) -> Reply {
 }
 
 fn data(app: &App, rq: &mut Request, v: Visitor, id: &str, q: &str) -> Reply {
-    let (info, allowed) = {
+    let (info, owner, owners) = {
         let st = app.st();
         let Some(s) = st.battles.get(id) else { return Reply::err(404, "not found") };
-        let live = is_live(s, now());
-        ((*s.info).clone(), !live || unlocked(app, &st, rq, v).0.contains(&s.owner))
+        let owners = if is_live(s, now()) { unlocked(app, &st, rq, v).0 } else { Vec::new() };
+        ((*s.info).clone(), s.owner.clone(), owners)
     };
+    let allowed = !is_live_info(&info, now()) || may_watch(&app.snapshot(), &info, &owner, &owners, now());
     if !allowed {
         return Reply::err(403, "live battle: needs a viewing code from the player");
     }
@@ -1584,6 +1626,10 @@ fn shown_info(i: &BattleInfo, t: u64) -> BattleInfo {
     i
 }
 
+fn is_live_info(i: &BattleInfo, t: u64) -> bool {
+    info_live(i, t)
+}
+
 fn info_live(i: &BattleInfo, t: u64) -> bool {
     i.live && t.saturating_sub(i.updated) < STALE_SECS
 }
@@ -1615,8 +1661,8 @@ fn list(app: &App, rq: &Request, q: &str, v: Visitor) -> Reply {
     let v: Vec<&BattleInfo> = snap
         .rows
         .iter()
-        .filter(|(i, owner)| !info_live(i, t) || owners.contains(owner))
         .filter(|(i, _)| group.is_empty() || i.group == group)
+        .filter(|(i, owner)| !info_live(i, t) || may_watch(&snap, i, owner, &owners, t))
         .filter(|(i, _)| player.is_empty() || i.player.to_lowercase().contains(&player))
         .map(|(i, _)| &**i)
         .collect();
@@ -1783,7 +1829,7 @@ mod tests {
 
     fn stored(id: &str, owner: &str, map: &str, tanks: &[i32], size: u64, created: u64) -> Stored {
         let info = Arc::new(BattleInfo { id: id.into(), player: "p".into(), map: map.into(), size, live: true, ..Default::default() });
-        Stored { info, owner: owner.into(), created, vehicle_ids: tanks.to_vec(), players: vec![], arena_id: 0 }
+        Stored { info, owner: owner.into(), created, vehicle_ids: tanks.to_vec(), players: vec![], arena_id: 0, allies: vec![] }
     }
 
     #[test]
