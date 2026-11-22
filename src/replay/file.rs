@@ -2,7 +2,7 @@
 //! While a battle is running the client writes `temp.wotreplay` as a plain, unencrypted packet
 //! stream (no JSON header); that "live" form is supported too.
 
-use blowfish::cipher::{generic_array::GenericArray, BlockDecrypt, KeyInit};
+use blowfish::cipher::{Array, BlockCipherDecrypt, KeyInit};
 use std::io::Read;
 
 const MAGIC: [u8; 4] = [0x12, 0x32, 0x34, 0x11];
@@ -70,7 +70,7 @@ impl ReplayFile {
         let mut out = Vec::with_capacity(self.encrypted.len());
         let mut prev = [0u8; 8];
         for chunk in self.encrypted.chunks_exact(8) {
-            let mut block = GenericArray::clone_from_slice(chunk);
+            let Ok(mut block) = Array::try_from(chunk) else { continue };
             cipher.decrypt_block(&mut block);
             for i in 0..8 {
                 prev[i] ^= block[i];

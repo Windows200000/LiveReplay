@@ -102,51 +102,78 @@ pub fn battle_link(id: &str) -> String {
 /// New random uploader key (stays on this PC; whoever has it can upload as you).
 pub fn new_key() -> String {
     let mut b = [0u8; 32];
-    let _ = getrandom::getrandom(&mut b);
+    let _ = getrandom::fill(&mut b);
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(10)).timeout(Duration::from_secs(60)).build()
+/// A failed request: the server answered with an error status (and its message), or it could
+/// not be reached.
+enum NetErr {
+    Status(u16, String),
+    Transport,
 }
 
-fn err(e: ureq::Error) -> String {
+type Resp = ureq::http::Response<ureq::Body>;
+
+fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(10)))
+        .timeout_global(Some(Duration::from_secs(60)))
+        // Error statuses come back as responses, so the server's message can be shown.
+        .http_status_as_error(false)
+        .build()
+        .into()
+}
+
+/// A response with an error status as [`NetErr::Status`].
+fn checked(r: Result<Resp, ureq::Error>) -> Result<Resp, NetErr> {
+    let mut r = r.map_err(|_| NetErr::Transport)?;
+    let code = r.status().as_u16();
+    if code >= 400 {
+        let msg = r.body_mut().with_config().limit(4096).read_to_string().unwrap_or_default();
+        return Err(NetErr::Status(code, msg));
+    }
+    Ok(r)
+}
+
+fn err(e: NetErr) -> String {
     match e {
-        ureq::Error::Status(code, r) => {
-            let msg = r.into_string().unwrap_or_default();
-            format!("server error {code}{}", if msg.is_empty() || msg.len() > 120 { String::new() } else { format!(": {msg}") })
-        }
+        NetErr::Status(code, msg) => format!("server error {code}{}", if msg.is_empty() || msg.len() > 120 { String::new() } else { format!(": {msg}") }),
         // Full details in the hover text of the status line; keep the message short.
-        ureq::Error::Transport(_) => "can't reach wot.arne.my (offline, or the server is down)".to_string(),
+        NetErr::Transport => "can't reach wot.arne.my (offline, or the server is down)".to_string(),
     }
 }
 
+fn json<R: serde::de::DeserializeOwned>(mut r: Resp) -> Result<R, String> {
+    r.body_mut().with_config().limit(64 << 20).read_json().map_err(|e| e.to_string())
+}
+
+fn header(r: &Resp, name: &str) -> Option<String> {
+    r.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_string)
+}
+
 fn post_json<T: serde::Serialize, R: serde::de::DeserializeOwned>(key: &str, path: &str, body: &T) -> Result<R, String> {
-    let r = agent().post(&format!("{}{path}", server_url())).set(api::KEY_HEADER, key).send_json(body).map_err(err)?;
-    r.into_json().map_err(|e| e.to_string())
+    let r = checked(agent().post(&format!("{}{path}", server_url())).header(api::KEY_HEADER, key).send_json(body)).map_err(err)?;
+    json(r)
 }
 
 fn post_bytes(key: &str, path: &str, body: &[u8]) -> Result<BattleInfo, String> {
-    let r = agent()
-        .post(&format!("{}{path}", server_url()))
-        .set(api::KEY_HEADER, key)
-        .set("Content-Type", "application/octet-stream")
-        .send_bytes(body)
+    let r = checked(agent().post(&format!("{}{path}", server_url())).header(api::KEY_HEADER, key).header("Content-Type", "application/octet-stream").send(body))
         .map_err(err)?;
-    r.into_json().map_err(|e| e.to_string())
+    json(r)
 }
 
 /// Everything the server keeps about this PC's uploads (GDPR access), as pretty JSON.
 pub fn my_data(key: &str) -> Result<String, String> {
-    let r = agent().get(&format!("{}/api/me", server_url())).set(api::KEY_HEADER, key).call().map_err(err)?;
-    let v: serde_json::Value = r.into_json().map_err(|e| e.to_string())?;
+    let r = checked(agent().get(&format!("{}/api/me", server_url())).header(api::KEY_HEADER, key).call()).map_err(err)?;
+    let v: serde_json::Value = json(r)?;
     serde_json::to_string_pretty(&v).map_err(|e| e.to_string())
 }
 
 /// Delete everything this PC uploaded (battles, codes, claimed names); returns how many battles.
 pub fn delete_my_data(key: &str) -> Result<usize, String> {
-    let r = agent().delete(&format!("{}/api/me", server_url())).set(api::KEY_HEADER, key).call().map_err(err)?;
-    let n = r.into_json().map_err(|e| e.to_string())?;
+    let r = checked(agent().delete(&format!("{}/api/me", server_url())).header(api::KEY_HEADER, key).call()).map_err(err)?;
+    let n = json(r)?;
     if let Some(p) = uploads_path() {
         let _ = std::fs::remove_file(p);
     }
@@ -157,7 +184,7 @@ pub fn delete_my_data(key: &str) -> Result<usize, String> {
 pub fn delete_upload(key: &str, file_name: &str) -> Result<(), String> {
     let mut m = uploaded();
     let Some(id) = m.remove(file_name) else { return Err("not uploaded".into()) };
-    agent().delete(&format!("{}/api/battles/{id}", server_url())).set(api::KEY_HEADER, key).call().map_err(err)?;
+    checked(agent().delete(&format!("{}/api/battles/{id}", server_url())).header(api::KEY_HEADER, key).call()).map_err(err)?;
     if let (Some(p), Ok(b)) = (uploads_path(), serde_json::to_vec(&m)) {
         let _ = std::fs::write(p, b);
     }
@@ -173,7 +200,7 @@ pub fn create_code(key: &str, days: u32) -> Result<CodeInfo, String> {
 }
 
 pub fn revoke_code(key: &str, code: &str) -> Result<(), String> {
-    agent().delete(&format!("{}/api/codes/{}", server_url(), api::normalize_code(code))).set(api::KEY_HEADER, key).call().map_err(err)?;
+    checked(agent().delete(&format!("{}/api/codes/{}", server_url(), api::normalize_code(code))).header(api::KEY_HEADER, key).call()).map_err(err)?;
     Ok(())
 }
 
@@ -333,9 +360,9 @@ impl Worker {
                 continue;
             }
             let url = format!("{}/api/assets/{name}", server_url());
-            let have = match agent().head(&url).call() {
-                Ok(r) => r.header(api::VERSION_HEADER).map(|v| v.to_string()),
-                Err(ureq::Error::Status(404, _)) => None,
+            let have = match checked(agent().head(&url).call()) {
+                Ok(r) => header(&r, api::VERSION_HEADER),
+                Err(NetErr::Status(404, _)) => None,
                 Err(e) => {
                     self.checked.remove(&name);
                     return Err(err(e));
@@ -352,9 +379,9 @@ impl Worker {
                     None => continue,
                 }
             };
-            match agent().put(&url).query("version", version).set(api::KEY_HEADER, &self.cfg.upload_key).send_bytes(&body) {
+            match checked(agent().put(&url).query("version", version).header(api::KEY_HEADER, &self.cfg.upload_key).send(&body[..])) {
                 // Another uploader maintains this asset: theirs stays.
-                Ok(_) | Err(ureq::Error::Status(403, _)) => {}
+                Ok(_) | Err(NetErr::Status(403, _)) => {}
                 Err(e) => {
                     self.checked.remove(&name);
                     return Err(err(e));
@@ -420,7 +447,7 @@ impl Worker {
         // The original replay file too (kept private on the server, for features that need more of it later).
         if let Ok(raw) = std::fs::read(path) {
             if full_replay(&raw) {
-                agent().put(&format!("{}/api/battles/{id}/replay", server_url())).set(api::KEY_HEADER, &self.cfg.upload_key).send_bytes(&raw).map_err(err)?;
+                checked(agent().put(&format!("{}/api/battles/{id}/replay", server_url())).header(api::KEY_HEADER, &self.cfg.upload_key).send(&raw[..])).map_err(err)?;
             }
         }
         remember(&file_name(path), &id);
@@ -468,9 +495,9 @@ impl Worker {
                 continue;
             }
             let url = format!("{}/api/assets/{name}", server_url());
-            let have = match agent().head(&url).call() {
-                Ok(r) => r.header(api::VERSION_HEADER).map(|v| v.to_string()),
-                Err(ureq::Error::Status(404, _)) => None,
+            let have = match checked(agent().head(&url).call()) {
+                Ok(r) => header(&r, api::VERSION_HEADER),
+                Err(NetErr::Status(404, _)) => None,
                 Err(e) => return Err(err(e)),
             };
             if have.as_deref() == Some(version) {
@@ -481,15 +508,15 @@ impl Worker {
         }
         if !todo.is_empty() {
             let names: Vec<&String> = todo.iter().map(|(n, _)| n).collect();
-            let _ = agent().post(&format!("{}/api/asset-expect", server_url())).set(api::KEY_HEADER, &self.cfg.upload_key).send_json(&names);
+            let _ = agent().post(&format!("{}/api/asset-expect", server_url())).header(api::KEY_HEADER, &self.cfg.upload_key).send_json(&names);
         }
         for (name, make) in todo {
             let url = format!("{}/api/assets/{name}", server_url());
             {
                 if let Some(body) = make() {
-                    match agent().put(&url).query("version", version).set(api::KEY_HEADER, &self.cfg.upload_key).send_bytes(&body) {
+                    match checked(agent().put(&url).query("version", version).header(api::KEY_HEADER, &self.cfg.upload_key).send(&body[..])) {
                         // Another uploader maintains this asset: theirs stays.
-                        Ok(_) | Err(ureq::Error::Status(403, _)) => {}
+                        Ok(_) | Err(NetErr::Status(403, _)) => {}
                         Err(e) => return Err(err(e)),
                     }
                 }

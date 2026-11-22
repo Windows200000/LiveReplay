@@ -1,6 +1,6 @@
 //! Look & feel: a clean dark theme with card-style panels, plus small vector icons for stats.
 
-use egui::{Color32, Pos2, Rect, Rounding, Shape, Stroke, Vec2};
+use egui::{Color32, CornerRadius, Pos2, Rect, Shape, Stroke, Vec2};
 
 pub const BG: Color32 = Color32::from_rgb(14, 17, 22);
 pub const PANEL: Color32 = Color32::from_rgb(20, 24, 31);
@@ -23,15 +23,15 @@ pub fn crit_icon_path(kind: &str, state: u8) -> String {
 }
 
 pub fn apply(ctx: &egui::Context) {
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     let v = &mut style.visuals;
     *v = egui::Visuals::dark();
     v.panel_fill = PANEL;
     v.window_fill = CARD;
     v.extreme_bg_color = BG;
     v.faint_bg_color = Color32::from_rgb(23, 27, 35);
-    v.window_rounding = Rounding::same(10.0);
-    v.menu_rounding = Rounding::same(8.0);
+    v.window_corner_radius = CornerRadius::same(10);
+    v.menu_corner_radius = CornerRadius::same(8);
     v.window_stroke = Stroke::new(1.0_f32, BORDER);
     v.override_text_color = Some(TEXT);
     v.selection.bg_fill = ACCENT.gamma_multiply(0.35);
@@ -44,7 +44,7 @@ pub fn apply(ctx: &egui::Context) {
         (&mut v.widgets.active, CARD_HOVER),
         (&mut v.widgets.open, CARD_HOVER),
     ] {
-        w.rounding = Rounding::same(6.0);
+        w.corner_radius = CornerRadius::same(6);
         w.bg_fill = fill;
         w.weak_bg_fill = fill;
         w.bg_stroke = Stroke::new(1.0_f32, BORDER);
@@ -55,13 +55,15 @@ pub fn apply(ctx: &egui::Context) {
     v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, ACCENT.gamma_multiply(0.6));
     style.spacing.item_spacing = Vec2::new(8.0, 6.0);
     style.spacing.button_padding = Vec2::new(10.0, 5.0);
-    style.spacing.window_margin = egui::Margin::same(12.0);
-    ctx.set_style(style);
+    style.spacing.window_margin = egui::Margin::same(12);
+    // The same dark look whatever the system's light/dark setting is.
+    ctx.all_styles_mut(|s| *s = style.clone());
+    ctx.set_theme(egui::Theme::Dark);
 }
 
 /// A card frame for grouped content.
 pub fn card() -> egui::Frame {
-    egui::Frame::none().fill(CARD).rounding(Rounding::same(10.0)).stroke(Stroke::new(1.0_f32, BORDER)).inner_margin(egui::Margin::same(10.0))
+    egui::Frame::NONE.fill(CARD).corner_radius(CornerRadius::same(10)).stroke(Stroke::new(1.0_f32, BORDER)).inner_margin(egui::Margin::same(10))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

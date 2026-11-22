@@ -191,13 +191,13 @@ fn paint_scale_slider(p: &egui::Painter, r: egui::Rect, value: f32, k: f32, acce
 /// original size (everything else rescales around it), so the value under the pointer stays put.
 fn ui_scale_slider(ui: &mut egui::Ui, scale: &mut f32) -> bool {
     let ctx = ui.ctx().clone();
-    let key = egui::Id::new("ui_scale_live_drag");
+    let key = egui::Id::unique("ui_scale_live_drag");
     let ppp = ctx.pixels_per_point();
     let (accent, rail) = (ui.visuals().selection.stroke.color, ui.visuals().widgets.inactive.bg_fill);
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(170.0, 20.0), egui::Sense::click_and_drag());
     let before = *scale;
     // (slider rectangle in physical pixels, pixels per point when the drag started)
-    let ppp_key = egui::Id::new("ui_scale_prev_ppp");
+    let ppp_key = egui::Id::unique("ui_scale_prev_ppp");
     let prev_ppp: f32 = ctx.data(|d| d.get_temp(ppp_key)).unwrap_or(ppp);
     ctx.data_mut(|d| d.insert_temp(ppp_key, ppp));
     let mut drag: Option<([f32; 4], f32)> = ctx.data(|d| d.get_temp(key));
@@ -229,7 +229,7 @@ fn ui_scale_slider(ui: &mut egui::Ui, scale: &mut f32) -> bool {
             let u = p0; // physical pixels per (original) point
             let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, key));
             let frame = px_rect(px[0] - 10.0 * u, px[1] - 8.0 * u, px[2] + 64.0 * u, px[3] + 8.0 * u);
-            painter.rect(frame, (6.0 * u).round() / ppp, ui.visuals().window_fill, egui::Stroke::new((1.0 * u).round().max(1.0) / ppp, ui.visuals().window_stroke.color));
+            painter.rect(frame, (6.0 * u).round() / ppp, ui.visuals().window_fill, egui::Stroke::new((1.0 * u).round().max(1.0) / ppp, ui.visuals().window_stroke.color), egui::StrokeKind::Middle);
             let cy = ((px[1] + px[3]) / 2.0).round();
             let t = ((*scale - SCALE_MIN) / (SCALE_MAX - SCALE_MIN)).clamp(0.0, 1.0);
             let hx = (px[0] + t * (px[2] - px[0])).round();
@@ -725,7 +725,8 @@ impl ReplayViewer {
         self.settings.view_3d = on;
     }
 
-    pub fn ui(&mut self, ctx: &egui::Context) {
+    pub fn ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         if let Some(text) = self.notice3d.clone() {
             let mut close = false;
             egui::Window::new("No 3D view for this map yet")
@@ -823,13 +824,13 @@ impl ReplayViewer {
         }
 
         if let Some(e) = &self.error {
-            egui::CentralPanel::default().show(ctx, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 ui.colored_label(Color32::LIGHT_RED, format!("Could not open replay: {e}"));
             });
             return;
         }
         let Some(loaded) = self.loaded.as_mut() else {
-            egui::CentralPanel::default().show(ctx, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 ui.centered_and_justified(|ui| {
                     if self.live_follow.is_some() {
                         ui.label("Waiting for a battle... start one in World of Tanks (replay recording must be enabled).");
@@ -868,7 +869,7 @@ impl ReplayViewer {
         let mut settings_changed = false;
 
         // Top bar: map, clock, playback controls, display settings.
-        egui::TopBottomPanel::top("viewer_top").show(ctx, |ui| {
+        egui::Panel::top("viewer_top").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading(format!("{} — {}", battle.map_display, battle.gameplay));
                 ui.separator();
@@ -923,7 +924,7 @@ impl ReplayViewer {
         // 3D view's corner minimap) and the UI scale.
         if self.settings.display_open {
             let show_2d_row = !self.settings.view_3d || self.settings.corner_minimap;
-            egui::TopBottomPanel::top("view_toggles").show(ctx, |ui| {
+            egui::Panel::top("view_toggles").show(ui, |ui| {
                 ui.add_space(2.0);
                 let s = &mut self.settings;
                 if s.view_3d {
@@ -942,7 +943,7 @@ impl ReplayViewer {
             });
         }
 
-        egui::TopBottomPanel::bottom("viewer_bottom").show(ctx, |ui| {
+        egui::Panel::bottom("viewer_bottom").show(ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 if ui.button(if self.playing { "⏸ Pause" } else { "▶ Play" }).clicked() {
@@ -980,13 +981,14 @@ impl ReplayViewer {
         let mut list_click: Option<i32> = None;
         let mut list_hover: Option<i32> = None;
         let map_hover = self.map_hover;
-        for (side, allies) in [(egui::panel::Side::Left, true), (egui::panel::Side::Right, false)] {
-            egui::SidePanel::new(side, if allies { "allies" } else { "enemies" })
+        for allies in [true, false] {
+            let id = if allies { "allies" } else { "enemies" };
+            if allies { egui::Panel::left(id) } else { egui::Panel::right(id) }
                 .resizable(true)
-                .default_width(210.0)
+                .default_size(210.0)
                 // Small windows: the lists give way to the map (long names get cut with "…").
-                .max_width((ctx.screen_rect().width() * 0.25).max(120.0))
-                .show(ctx, |ui| {
+                .max_size((ctx.content_rect().width() * 0.25).max(120.0))
+                .show(ui, |ui| {
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
                     ui.label(RichText::new(if allies { "Allies" } else { "Enemies" }).strong().color(team_color(allies)));
                     egui::ScrollArea::vertical().show(ui, |ui| {
@@ -1013,7 +1015,7 @@ impl ReplayViewer {
                             }
                             // Highlight the row of the tank hovered on the map (and the hovered row itself).
                             if !selected && (map_hover == Some(v.id) || r.hovered()) {
-                                ui.painter().rect_stroke(r.rect.expand(1.0), 3.0, egui::Stroke::new(1.5_f32, super::minimap2d::HOVER));
+                                ui.painter().rect_stroke(r.rect.expand(1.0), 3.0, egui::Stroke::new(1.5_f32, super::minimap2d::HOVER), egui::StrokeKind::Middle);
                             }
                             // Out of view, the replay has no health updates (only the death, when it
                             // happens): the bar is the health when last seen, drawn faded.
@@ -1139,7 +1141,7 @@ impl ReplayViewer {
         } else {
             None
         };
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             if show_3d {
                 let full = ui.max_rect();
                 out = Some(loaded.view3d.as_mut().unwrap().show(ui, &input));
@@ -1153,7 +1155,7 @@ impl ReplayViewer {
                     ui.painter().rect_filled(r.expand(2.0), 2.0, Color32::from_black_alpha(160));
                     let camera = loaded.view3d.as_ref().and_then(|v| v.camera_mark());
                     let input2d = ViewInput { settings: &self.settings.view2d, camera, ..input };
-                    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(r), |ui| {
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
                         out_mini = Some(loaded.view.show(ui, &input2d));
                     });
                 }
@@ -1173,7 +1175,7 @@ impl ReplayViewer {
                     out = Some(loaded.view.show(ui, &input));
                 });
                 // Over the map's top edge, drawn after the map so it stays visible.
-                capture_bar(&ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("capture_bar"))), bar, &captures, battle.recorder_team);
+                capture_bar(&ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("capture_bar"))), bar, &captures, battle.recorder_team);
             }
         });
         let mut out = out.unwrap();
@@ -1208,7 +1210,7 @@ impl ReplayViewer {
         let realm = battle.server_realm.clone();
         if let Some(id) = out.hovered.filter(|h| Some(*h) != self.pinned) {
             if let Some(anchor) = out.anchors.get(&id) {
-                egui::Area::new(egui::Id::new("hover_stats"))
+                egui::Area::new(egui::Id::unique("hover_stats"))
                     .order(egui::Order::Tooltip)
                     .fixed_pos(*anchor + egui::vec2(16.0, 12.0))
                     .interactable(false)
@@ -1222,7 +1224,7 @@ impl ReplayViewer {
             let mut action = PanelAction::None;
             // Follow toggle only exists in the 3D view.
             let following = loaded.view3d.as_ref().filter(|_| show_3d).map(|v| v.follow() == Some(id));
-            egui::Area::new(egui::Id::new("pinned_stats"))
+            egui::Area::new(egui::Id::unique("pinned_stats"))
                 .order(egui::Order::Foreground)
                 .current_pos(anchor + egui::vec2(16.0, 12.0))
                 .show(ctx, |ui| {
@@ -1244,7 +1246,7 @@ impl ReplayViewer {
 
         if let Some(p) = self.share_menu {
             let link = self.share_link();
-            let r = egui::Area::new(egui::Id::new("map_menu")).order(egui::Order::Foreground).fixed_pos(p).show(ctx, |ui| {
+            let r = egui::Area::new(egui::Id::unique("map_menu")).order(egui::Order::Foreground).fixed_pos(p).show(ctx, |ui| {
                 egui::Frame::menu(ui.style()).show(ui, |ui| {
                     if ui.button("Copy link to this moment and view").clicked() {
                         if let Some(l) = &link {

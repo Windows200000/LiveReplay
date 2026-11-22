@@ -21,9 +21,9 @@ fn main() -> anyhow::Result<()> {
     let key = "fakeview-test-key-0123456789abcdef0123456789";
     let nb = NewBattle { player: "viewpoint_tester".into(), realm: b.server_realm.clone(), map: b.map.clone(), map_display: b.map_display.clone(),
         mode: "Test".into(), tank: b.vehicles[&other].tank_short.clone(), date: date.clone(), version: String::new(), live: false,
-        file_name: "fakeview.wotreplay".into(), vehicle_ids: b.vehicles.keys().copied().collect(), players: b.vehicles.values().map(|v| v.name.clone()).collect() };
-    let info: BattleInfo = ureq::post(&format!("{server}/api/battles")).set(KEY_HEADER, key).send_json(&nb)?.into_json()?;
-    ureq::post(&format!("{server}/api/battles/{}/frames?reset=1&finish=1", info.id)).set(KEY_HEADER, key).send_bytes(&wire::encode_frame(&b, 0.0))?;
+        file_name: "fakeview.wotreplay".into(), arena_id: 0, vehicle_ids: b.vehicles.keys().copied().collect(), players: b.vehicles.values().map(|v| v.name.clone()).collect() };
+    let info: BattleInfo = ureq::post(&format!("{server}/api/battles")).header(KEY_HEADER, key).send_json(&nb)?.body_mut().read_json()?;
+    ureq::post(&format!("{server}/api/battles/{}/frames?reset=1&finish=1", info.id)).header(KEY_HEADER, key).send(&wire::encode_frame(&b, 0.0))?;
     println!("battle {} group {:?} recorder {other}", info.id, info.group);
     b.duration = 0.0;
     Ok(())

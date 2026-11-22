@@ -238,7 +238,8 @@ impl App {
         }
     }
 
-    fn library_page(&mut self, ctx: &egui::Context) {
+    fn library_page(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         for ev in self.scan.as_ref().map(|rx| rx.try_iter().collect::<Vec<_>>()).unwrap_or_default() {
             match ev {
                 ScanEvent::Progress { done, total } => self.status = format!("Reading replays {done}/{total}"),
@@ -254,7 +255,7 @@ impl App {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
 
-        egui::TopBottomPanel::top("library_top").show(ctx, |ui| {
+        egui::Panel::top("library_top").show(ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.heading("LiveReplay");
@@ -329,7 +330,7 @@ impl App {
         let mut watch_live = false;
         let in_progress = self.in_progress.lock().unwrap().as_ref().map(|(_, e)| e.clone());
         if let Some(e) = &in_progress {
-            egui::TopBottomPanel::top("in_progress").show(ctx, |ui| {
+            egui::Panel::top("in_progress").show(ui, |ui| {
                 ui.add_space(4.0);
                 let red = Color32::from_rgb(255, 80, 70);
                 let text = format!("LIVE   {}   {}   {}   {}   in progress", e.player_name, e.tank, e.map, e.mode);
@@ -345,7 +346,7 @@ impl App {
             self.open_live();
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| match self.table.show(ui, &self.entries, &mut self.selected, self.sort) {
+        egui::CentralPanel::default().show(ui, |ui| match self.table.show(ui, &self.entries, &mut self.selected, self.sort) {
             Action::Open(p) => self.open_viewer(PathBuf::from(p)),
             Action::Sort(col, desc) => {
                 self.sort = (col, desc);
@@ -613,7 +614,8 @@ impl App {
 
 impl App {
     /// Update notice above everything (list and viewer); the tray tooltip says it too.
-    fn update_notice(&mut self, ctx: &egui::Context) {
+    fn update_notice(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         let state = self.updater.state();
         if self.tray_state.as_ref() != Some(&state) {
             desktop::set_tooltip(&match &state {
@@ -627,7 +629,7 @@ impl App {
             return;
         }
         let blue = Color32::from_rgb(90, 160, 255);
-        egui::TopBottomPanel::top("update_notice").show(ctx, |ui| {
+        egui::Panel::top("update_notice").show(ui, |ui| {
             ui.horizontal(|ui| {
                 match &state {
                     update::State::Available(v, page) => {
@@ -668,7 +670,8 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = &ui.ctx().clone();
         // Close button: into the tray (unless turned off in Settings).
         if ctx.input(|i| i.viewport().close_requested()) && self.cfg.close_to_tray && desktop::tray_available() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -691,7 +694,7 @@ impl eframe::App for App {
             // Nothing is drawn and no redraw is asked for: the window costs nothing until shown.
             return;
         }
-        self.update_notice(ctx);
+        self.update_notice(ui);
         if self.first_frame {
             self.first_frame = false;
             crate::viewer::theme::apply(ctx);
@@ -702,19 +705,19 @@ impl eframe::App for App {
         }
 
         // A .wotreplay dropped anywhere opens in the viewer.
-        if let Some(path) = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).find(|p| p.extension().is_some_and(|e| e == "wotreplay"))) {
+        if let Some(path) = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).find(|p| p.extension().is_some_and(|e| e == "wotreplay"))) {
             self.open_viewer(path);
         }
 
         if let Some(viewer) = &mut self.viewer {
             let mut back = ctx.input(|i| i.key_pressed(egui::Key::Escape));
-            egui::TopBottomPanel::top("viewer_nav").show(ctx, |ui| {
+            egui::Panel::top("viewer_nav").show(ui, |ui| {
                 ui.horizontal(|ui| {
                     back |= ui.button("\u{2B05} Replays").clicked();
                     ui.label(&viewer.title);
                 });
             });
-            viewer.ui(ctx);
+            viewer.ui(ui);
             if self.engine.is_none() {
                 self.engine = viewer.engine.clone();
             }
@@ -733,7 +736,7 @@ impl eframe::App for App {
             vs.save();
         }
         crate::viewer::player::apply_ui_scale(ctx, self.ui_scale);
-        self.library_page(ctx);
+        self.library_page(ui);
         self.settings_window(ctx);
         self.consent_window(ctx);
     }
