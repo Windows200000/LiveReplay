@@ -62,6 +62,10 @@ const CLAIMS_PER_KEY: usize = 10;
 const MAX_CLAIMS: usize = 500_000;
 const MAX_CODES: usize = 200_000;
 const MAX_ASSETS: usize = 200_000;
+/// Battles their uploader deleted are hidden at once and erased after this many days
+/// (`DELETED_KEEP_DAYS`): so the operator can undo deletions someone made with another
+/// player's name (see the privacy policy).
+const DELETED_KEEP_DAYS: u64 = 30;
 /// Longest text kept from a battle's description fields.
 const MAX_TEXT: usize = 100;
 /// Viewing codes looked at per request.
@@ -183,6 +187,9 @@ struct Stored {
     /// team are shared with that team's codes, see [`may_watch`]).
     #[serde(default)]
     allies: Vec<String>,
+    /// Unix seconds its uploader deleted it (0 = not deleted): hidden, erased later.
+    #[serde(default)]
+    deleted: u64,
 }
 
 /// Files that changed in memory and are written after the request.
@@ -196,6 +203,10 @@ struct Dirty {
 #[derive(Default)]
 struct State {
     claims: HashMap<String, String>,
+    /// When each player name was claimed (Unix seconds; names claimed before this was kept: 0).
+    claim_times: HashMap<String, u64>,
+    /// Battles their uploader deleted: hidden everywhere, erased after [`DELETED_KEEP_DAYS`].
+    deleted: HashMap<String, Stored>,
     codes: HashMap<String, Code>,
     battles: HashMap<String, Stored>,
     assets: HashMap<String, AssetMeta>,
@@ -228,6 +239,10 @@ struct Snapshot {
 struct Member {
     id: String,
     owner: String,
+    /// When its uploader's key claimed this player name (Unix seconds; 0 = long ago).
+    claimed: u64,
+    /// When the upload started.
+    created: u64,
     /// Lower-case player name of the uploader.
     player: String,
     allies: Vec<String>,
@@ -243,7 +258,10 @@ fn may_watch(snap: &Snapshot, i: &BattleInfo, owner: &str, owners: &[String], t:
     }
     let Some(members) = snap.members.get(&i.group) else { return false };
     let Some(me) = members.iter().find(|m| m.id == i.id) else { return false };
-    members.iter().any(|u| u.id != me.id && owners.contains(&u.owner) && u.allies.contains(&me.player) && me.allies.contains(&u.player))
+    // The teammate whose code is used must have had their player name before this upload began:
+    // a name claimed during the battle (e.g. an enemy registering as a teammate who never used
+    // the app) only ever shows its own upload.
+    members.iter().any(|u| u.id != me.id && owners.contains(&u.owner) && u.claimed <= me.created && u.allies.contains(&me.player) && me.allies.contains(&u.player))
 }
 
 /// Storage in use, per uploader key and in total.
@@ -369,11 +387,16 @@ impl App {
             st.claims.entry(key).or_insert(owner);
         }
         write_json(&data.join("claims.json"), &st.claims);
+        st.claim_times = read_json(&data.join("claim_times.json"));
         for e in std::fs::read_dir(data.join("battles")).into_iter().flatten().flatten() {
             let p = e.path();
             if p.extension().is_some_and(|x| x == "json") {
                 if let Some(s) = std::fs::read(&p).ok().and_then(|b| serde_json::from_slice::<Stored>(&b).ok()) {
-                    st.battles.insert(s.info.id.clone(), s);
+                    if s.deleted > 0 {
+                        st.deleted.insert(s.info.id.clone(), s);
+                    } else {
+                        st.battles.insert(s.info.id.clone(), s);
+                    }
                 }
             }
         }
@@ -435,16 +458,17 @@ impl App {
     /// Write the JSON files that changed (after a request, with the state unlocked while writing).
     fn flush(&self) {
         let _p = self.persist.lock().unwrap_or_else(|e| e.into_inner());
-        let (claims, codes, blocked) = {
+        let (claims, claim_times, codes, blocked) = {
             let mut st = self.st();
             let d = std::mem::take(&mut st.dirty);
             (
                 d.claims.then(|| serde_json::to_vec(&st.claims).ok()).flatten(),
+                d.claims.then(|| serde_json::to_vec(&st.claim_times).ok()).flatten(),
                 d.codes.then(|| serde_json::to_vec(&st.codes).ok()).flatten(),
                 d.blocked.then(|| serde_json::to_vec(&st.blocked).ok()).flatten(),
             )
         };
-        for (name, b) in [("claims.json", claims), ("codes.json", codes), ("blocked.json", blocked)] {
+        for (name, b) in [("claims.json", claims), ("claim_times.json", claim_times), ("codes.json", codes), ("blocked.json", blocked)] {
             if let Some(b) = b {
                 let _ = write_atomic(&self.data.join(name), &b);
             }
@@ -458,7 +482,7 @@ impl App {
             let _ = std::fs::remove_file(dir.join(format!("{id}.{ext}")));
         }
         st.epoch += 1;
-        if let Some(s) = st.battles.remove(id) {
+        if let Some(s) = st.battles.remove(id).or_else(|| st.deleted.remove(id)) {
             if let Some((_, u)) = self.usage.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
                 let n = s.info.size + s.info.replay_size;
                 u.total = u.total.saturating_sub(n);
@@ -470,6 +494,27 @@ impl App {
         } else {
             false
         }
+    }
+
+    /// A deletion by its uploader: hidden at once, erased after [`DELETED_KEEP_DAYS`] (the
+    /// operator can restore it meanwhile). Caller holds the state lock.
+    fn hide_battle(&self, st: &mut State, id: &str) -> bool {
+        let Some(mut s) = st.battles.remove(id) else { return false };
+        s.deleted = now().max(1);
+        self.save_battle(&s);
+        st.deleted.insert(id.to_string(), s);
+        st.epoch += 1;
+        true
+    }
+
+    /// Undo a deletion (operator).
+    fn restore_battle(&self, st: &mut State, id: &str) -> bool {
+        let Some(mut s) = st.deleted.remove(id) else { return false };
+        s.deleted = 0;
+        self.save_battle(&s);
+        st.battles.insert(id.to_string(), s);
+        st.epoch += 1;
+        true
     }
 
     fn save_battle(&self, s: &Stored) {
@@ -632,7 +677,16 @@ impl App {
             let voters: HashSet<String> = rows.iter().map(|r| &r.1).filter(|k| claimed.contains(k)).cloned().collect();
             let mut members: HashMap<String, Vec<Member>> = HashMap::new();
             for s in st.battles.values().filter(|s| s.info.live && !s.info.group.is_empty()) {
-                members.entry(s.info.group.clone()).or_default().push(Member { id: s.info.id.clone(), owner: s.owner.clone(), player: s.info.player.to_lowercase(), allies: s.allies.clone() });
+                let claim = claim_key(&s.info.realm, &s.info.player);
+                let claimed = if st.claims.get(&claim) == Some(&s.owner) { st.claim_times.get(&claim).copied().unwrap_or(0) } else { u64::MAX };
+                members.entry(s.info.group.clone()).or_default().push(Member {
+                    id: s.info.id.clone(),
+                    owner: s.owner.clone(),
+                    claimed,
+                    created: s.created,
+                    player: s.info.player.to_lowercase(),
+                    allies: s.allies.clone(),
+                });
             }
             (rows, voters, members)
         };
@@ -672,7 +726,9 @@ impl App {
 /// Bytes stored per uploader and for the whole server (battle data, original replays, assets).
 fn usage(st: &State) -> Usage {
     let mut u = Usage::default();
-    for s in st.battles.values() {
+    // Deleted battles still take space until erased (deleting and uploading again doesn't get
+    // around the limits).
+    for s in st.battles.values().chain(st.deleted.values()) {
         let n = s.info.size + s.info.replay_size;
         u.total += n;
         *u.per_owner.entry(s.owner.clone()).or_default() += n;
@@ -939,7 +995,7 @@ fn route(app: &App, rq: &mut Request, v: Visitor) -> Reply {
             let mut st = app.st();
             match st.battles.get(*id) {
                 Some(s) if owns(&st, &owner, s) => {
-                    app.remove_battle(&mut st, id);
+                    app.hide_battle(&mut st, id);
                     Reply::json(&())
                 }
                 Some(_) => Reply::err(403, "not yours"),
@@ -967,7 +1023,7 @@ fn route(app: &App, rq: &mut Request, v: Visitor) -> Reply {
             if !app.guard.heavy(v) {
                 return Reply::err(429, "too many requests");
             }
-            Reply::json(&forget_uploader(app, &mut app.st(), &owner))
+            Reply::json(&forget_uploader(app, &mut app.st(), &owner, false))
         }
         (Method::Get, ["api", "battles"]) => list(app, rq, q, v),
         (Method::Get, ["api", "battles", id]) => {
@@ -1147,11 +1203,24 @@ fn route(app: &App, rq: &mut Request, v: Visitor) -> Reply {
 
 /// Everything of one uploader key: its uploads (also those for its player names by older keys),
 /// codes, player names and asset votes. Returns how many battles went.
-fn forget_uploader(app: &App, st: &mut State, owner: &str) -> usize {
+/// `erase`: at once (operator: blocking); else hidden and erased later (the uploader's own
+/// deletion, see [`App::hide_battle`]).
+fn forget_uploader(app: &App, st: &mut State, owner: &str, erase: bool) -> usize {
     let view: &State = st;
     let ids: Vec<String> = view.battles.values().filter(|s| owns(view, owner, s)).map(|s| s.info.id.clone()).collect();
     for id in &ids {
-        app.remove_battle(st, id);
+        if erase {
+            app.remove_battle(st, id);
+        } else {
+            app.hide_battle(st, id);
+        }
+    }
+    if erase {
+        // Also what it deleted itself before.
+        let hidden: Vec<String> = st.deleted.values().filter(|s| s.owner == owner).map(|s| s.info.id.clone()).collect();
+        for id in &hidden {
+            app.remove_battle(st, id);
+        }
     }
     let n = st.codes.len();
     st.codes.retain(|_, c| c.owner != owner);
@@ -1159,6 +1228,8 @@ fn forget_uploader(app: &App, st: &mut State, owner: &str) -> usize {
     let n = st.claims.len();
     st.claims.retain(|_, k| *k != owner);
     st.dirty.claims |= n != st.claims.len();
+    let State { claims, claim_times, .. } = st;
+    claim_times.retain(|c, _| claims.contains_key(c));
     let voted: Vec<String> = st.assets.iter().filter(|(_, m)| m.copies().any(|c| c.votes.iter().any(|x| x.key == owner))).map(|(n, _)| n.clone()).collect();
     for name in voted {
         if let Some(m) = st.assets.get_mut(&name) {
@@ -1347,6 +1418,7 @@ fn new_battle(app: &App, rq: &mut Request, v: Visitor) -> Reply {
         }
         None if !app.guard.take(v, Daily::Claims, 1) => return Reply::err(429, "too many new player names from here today"),
         None => {
+            st.claim_times.insert(claim.clone(), now());
             st.claims.insert(claim, owner.clone());
             st.dirty.claims = true;
         }
@@ -1411,7 +1483,7 @@ fn new_battle(app: &App, rq: &mut Request, v: Visitor) -> Reply {
     }
     let id = loop {
         let id = token(10).to_ascii_lowercase();
-        if !st.battles.contains_key(&id) {
+        if !st.battles.contains_key(&id) && !st.deleted.contains_key(&id) {
             break id;
         }
     };
@@ -1460,7 +1532,7 @@ fn new_battle(app: &App, rq: &mut Request, v: Visitor) -> Reply {
         }
         info.group = st.battles[&mate].info.group.clone();
     }
-    let s = Stored { info: Arc::new(info.clone()), owner, created: t, vehicle_ids: nb.vehicle_ids, players, arena_id: nb.arena_id, allies };
+    let s = Stored { info: Arc::new(info.clone()), owner, created: t, vehicle_ids: nb.vehicle_ids, players, arena_id: nb.arena_id, allies, deleted: 0 };
     app.save_battle(&s);
     st.battles.insert(id, s);
     Reply::json(&info)
@@ -1767,6 +1839,11 @@ fn maintain(app: &App) {
         for id in &empty {
             app.remove_battle(&mut st, id);
         }
+        let keep = env_num("DELETED_KEEP_DAYS", DELETED_KEEP_DAYS) * 86400;
+        let expired: Vec<String> = st.deleted.values().filter(|s| t.saturating_sub(s.deleted) > keep).map(|s| s.info.id.clone()).collect();
+        for id in &expired {
+            app.remove_battle(&mut st, id);
+        }
         let mut changed = Vec::new();
         for (name, m) in st.assets.iter_mut() {
             if m.expire(t) {
@@ -1829,7 +1906,7 @@ mod tests {
 
     fn stored(id: &str, owner: &str, map: &str, tanks: &[i32], size: u64, created: u64) -> Stored {
         let info = Arc::new(BattleInfo { id: id.into(), player: "p".into(), map: map.into(), size, live: true, ..Default::default() });
-        Stored { info, owner: owner.into(), created, vehicle_ids: tanks.to_vec(), players: vec![], arena_id: 0, allies: vec![] }
+        Stored { info, owner: owner.into(), created, vehicle_ids: tanks.to_vec(), players: vec![], arena_id: 0, allies: vec![], deleted: 0 }
     }
 
     #[test]

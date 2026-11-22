@@ -18,7 +18,9 @@
 //! - `PUT /api/battles/{id}/replay` K: the original .wotreplay file (kept private: never served to
 //!   others; `GET` with the owner's key downloads it)
 //! - `GET /api/me` K -> [`MyData`];  `DELETE /api/me` K: delete everything of this uploader;
-//!   `DELETE /api/battles/{id}` K: delete one battle (GDPR access / erasure)
+//!   `DELETE /api/battles/{id}` K: delete one battle (GDPR access / erasure). Deleted battles are
+//!   hidden at once and erased after 30 days (the operator can undo a deletion meanwhile:
+//!   `POST /api/admin/battles/{id}/restore`)
 //! - `POST /api/asset-expect` K, body: JSON list of asset names about to be uploaded (shown as
 //!   "expected" for 10 minutes); `GET /api/asset-status?names=a,b` -> name -> [`AssetStatus`]
 //! - `GET /privacy`: privacy policy;  `GET /api/info` -> [`ServerInfo`]

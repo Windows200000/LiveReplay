@@ -18,6 +18,7 @@ pub fn page() -> String {
         esc(&contact)
     };
     let address = env("OPERATOR_ADDRESS").map(|a| format!("<br>{}", esc(&a))).unwrap_or_default();
+    let keep = std::env::var("DELETED_KEEP_DAYS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(super::DELETED_KEEP_DAYS);
     format!(
         r#"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -70,7 +71,10 @@ You can object at any time (below).</li>
 from the player who uploads it.</p>
 
 <h2>How long</h2>
-<p>Battles are kept until the uploader deletes them or a removal request is handled. Viewing codes are deleted when they expire
+<p>Battles are kept until the uploader deletes them or a removal request is handled. A battle its uploader deletes
+disappears from the website at once and is erased {keep} days later; until then it is kept only so that a deletion made by
+someone else with the uploader's player name can be undone (legitimate interest, Art. 6(1)(f) GDPR), and is not shown
+or used otherwise. Removal requests handled by the operator are erased at once. Viewing codes are deleted when they expire
 (at most 31 days) or are revoked.</p>
 
 <h2>Your rights</h2>

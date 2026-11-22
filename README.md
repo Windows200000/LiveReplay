@@ -106,7 +106,8 @@ stores and serves it, and the web viewer (the same viewer compiled to WebAssembl
 * Operator page: `https://<domain>/admin` (type `ADMIN_TOKEN`): overview (biggest uploaders, newest battles, contested
   game data, blocked keys), delete a battle, delete a player's uploads and free the name (optionally every battle the
   player is in: objection from a player who didn't upload), block an uploader key (removes everything it uploaded; also
-  by player name or battle), pin a copy of game data, delete one or all game data. Same as `curl` calls, see `api/src/lib.rs`.
+  by player name or battle), restore a battle its uploader deleted (kept `DELETED_KEEP_DAYS`, 30), pin a copy of
+  game data, delete one or all game data. Same as `curl` calls, see `api/src/lib.rs`.
 * Privacy (GDPR): the policy is served at `/privacy` from the operator settings. No IP addresses or access logs, no cookies,
   no tracking. Uploaders consent in the app before the first upload and can download (`GET /api/me`) or delete
   (`DELETE /api/me`, `DELETE /api/battles/<id>`) their data from Settings. "This player name belongs to another
@@ -135,6 +136,13 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 Nothing open.
 
 ### Done
+- Team sharing can't be faked with a new install (user): a teammate's upload only opens other viewpoints if that
+  player name was registered before the viewpoint's upload began, so an enemy registering mid-battle as a teammate
+  who never used the app sees only their own upload (tested)
+- Deleted battles kept 30 days (user asked for 90 "or however long is GDPR compliant"; 30 = the one-month answer
+  time of Art. 12(3), `DELETED_KEEP_DAYS`): a battle its uploader deletes is hidden at once, kept only so the operator
+  can undo deletions made with someone else's name (restore on `/admin`), then erased; still counts toward storage
+  limits. Operator removals and blocks erase at once. Privacy policy says so (tested: hidden, restored, erased)
 - Finished battles always merge every viewpoint (user): opening one merges all uploads of it; when a live battle
   ends while watched, the viewpoints that are public now (also the other team's) are merged in, and the others are
   fetched for two more minutes so their last part arrives. Unticking one keeps it off. Tested in a browser (finished:

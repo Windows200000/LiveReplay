@@ -76,6 +76,10 @@ async function load() {
     o.contested.map((a) => [esc(a.name) + (a.pinned ? " (pinned)" : ""), a.copies.map((c) => `<code>${esc(c.hash)}</code> ${esc(c.version)} ${c.votes} votes ${mb(c.size)} ` +
       `<button data-pin="${esc(a.name)}" data-hash="${esc(c.hash)}">serve this one</button>`).join("<br>") +
       (a.pinned ? ` <button data-unpin="${esc(a.name)}">let votes decide</button>` : "")])) : "<p class=muted>none</p>");
+  const day = (t) => new Date(t * 1000).toISOString().slice(0, 10);
+  h += `<h2>Deleted by their uploader (${o.deleted_count}; hidden, erased after the retention time)</h2>` + (o.deleted.length ? table(["id", "player", "map", "date", "key", "deleted", "erased", ""],
+    o.deleted.map((b) => [esc(b.id), esc(b.realm + ":" + b.player), esc(b.map), esc(b.date), `<code>${esc(b.key)}</code>`, day(b.deleted), day(b.erase),
+      `<button data-restore="${esc(b.id)}">restore</button>`])) : "<p class=muted>none</p>");
   h += "<h2>Blocked keys</h2>" + (o.blocked.length ? table(["key", ""], o.blocked.map((k) => [`<code>${esc(k)}</code>`, `<button data-unblock="${esc(k)}">unblock</button>`])) : "<p class=muted>none</p>");
   $("overview").innerHTML = h;
 }
@@ -94,6 +98,7 @@ $("overview").addEventListener("click", (e) => {
   if (b && b.dataset.block) act("POST", "/api/admin/block?key=" + encodeURIComponent(b.dataset.block), "Block key " + b.dataset.block);
   if (b && b.dataset.pin) act("POST", "/api/admin/assets/" + encodeURIComponent(b.dataset.pin) + "/pin?hash=" + encodeURIComponent(b.dataset.hash), "Always serve this copy of " + b.dataset.pin);
   if (b && b.dataset.unpin) act("DELETE", "/api/admin/assets/" + encodeURIComponent(b.dataset.unpin) + "/pin", "Let votes decide " + b.dataset.unpin);
+  if (b && b.dataset.restore) act("POST", "/api/admin/battles/" + encodeURIComponent(b.dataset.restore) + "/restore", "Restore battle " + b.dataset.restore);
   if (b && b.dataset.unblock) act("DELETE", "/api/admin/block/" + encodeURIComponent(b.dataset.unblock), "Unblock key " + b.dataset.unblock);
 });
 "#;
@@ -137,6 +142,19 @@ struct Recent {
 }
 
 #[derive(Serialize)]
+struct Deleted {
+    id: String,
+    player: String,
+    realm: String,
+    map: String,
+    date: String,
+    key: String,
+    /// Unix seconds it was deleted, and when it will be erased.
+    deleted: u64,
+    erase: u64,
+}
+
+#[derive(Serialize)]
 struct CopyInfo {
     hash: String,
     version: String,
@@ -164,6 +182,8 @@ struct Overview {
     uploaders: Vec<Uploader>,
     recent: Vec<Recent>,
     contested: Vec<Contested>,
+    deleted_count: usize,
+    deleted: Vec<Deleted>,
 }
 
 fn overview(st: &State) -> Overview {
@@ -207,6 +227,23 @@ fn overview(st: &State) -> Overview {
         .collect();
     contested.sort_by(|a, b| a.name.cmp(&b.name));
     contested.truncate(200);
+    let keep = env_num("DELETED_KEEP_DAYS", DELETED_KEEP_DAYS) * 86400;
+    let mut deleted: Vec<&Stored> = st.deleted.values().collect();
+    deleted.sort_by(|a, b| b.deleted.cmp(&a.deleted));
+    let deleted_list = deleted
+        .into_iter()
+        .take(100)
+        .map(|s| Deleted {
+            id: s.info.id.clone(),
+            player: s.info.player.clone(),
+            realm: s.info.realm.clone(),
+            map: s.info.map.clone(),
+            date: s.info.date.clone(),
+            key: short(&s.owner),
+            deleted: s.deleted,
+            erase: s.deleted + keep,
+        })
+        .collect();
     let mut blocked: Vec<String> = st.blocked.iter().map(|k| short(k)).collect();
     blocked.sort();
     Overview {
@@ -221,6 +258,8 @@ fn overview(st: &State) -> Overview {
         uploaders,
         recent,
         contested,
+        deleted_count: st.deleted.len(),
+        deleted: deleted_list,
     }
 }
 
@@ -240,6 +279,8 @@ pub fn route(app: &App, rq: &mut Request, method: &Method, parts: &[&str], q: &s
     match (method, parts) {
         (Method::Get, ["overview"]) => Reply::json(&overview(&st)),
         (Method::Delete, ["battles", id]) => Reply::json(&app.remove_battle(&mut st, id)),
+        // Undo a deletion by its uploader (within the retention time).
+        (Method::Post, ["battles", id, "restore"]) => Reply::json(&app.restore_battle(&mut st, id)),
         (Method::Delete, ["players", name]) => {
             // The battles uploaded for this player name, whatever key sent them; with
             // `everywhere`, also other players' uploads the player is in.
@@ -257,6 +298,8 @@ pub fn route(app: &App, rq: &mut Request, method: &Method, parts: &[&str], q: &s
             }
             // The name is free again: the next uploader of it claims it.
             st.claims.retain(|claim, _| claim.split_once(':').is_none_or(|(r, p)| p != name || realm.as_ref().is_some_and(|x| x != r)));
+            let State { claims, claim_times, .. } = &mut *st;
+            claim_times.retain(|c, _| claims.contains_key(c));
             st.dirty.claims = true;
             Reply::json(&ids)
         }
@@ -273,7 +316,7 @@ pub fn route(app: &App, rq: &mut Request, method: &Method, parts: &[&str], q: &s
                 query(q, "key").and_then(|k| find_key(&st, &k))
             };
             let Some(key) = key else { return Reply::err(404, "no such uploader (or more than one: be more specific)") };
-            let n = forget_uploader(app, &mut st, &key);
+            let n = forget_uploader(app, &mut st, &key, true);
             st.blocked.insert(key.clone());
             st.dirty.blocked = true;
             println!("blocked uploader {}, removed {n} battles", short(&key));
