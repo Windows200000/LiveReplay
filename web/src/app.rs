@@ -563,7 +563,8 @@ impl WebApp {
         o.loaded = true;
     }
 
-    fn battles_page(&mut self, ctx: &egui::Context) {
+    fn battles_page(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         let t = ctx.input(|i| i.time);
         if t >= self.next_live && !self.live_loading && !self.codes.is_empty() {
             self.next_live = t + LIVE_LIST_SECS;
@@ -582,7 +583,7 @@ impl WebApp {
             ctx.request_repaint_after(std::time::Duration::from_secs(5));
         }
         let mut open: Option<String> = None;
-        egui::TopBottomPanel::top("web_top").show(ctx, |ui| {
+        egui::Panel::top("web_top").show(ui, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.heading(RichText::new("LiveReplay").strong());
@@ -598,7 +599,7 @@ impl WebApp {
             });
             ui.add_space(6.0);
         });
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 ui.add_space(4.0);
                 ui.label(RichText::new("Live battles").size(17.0).strong());
@@ -717,7 +718,8 @@ impl WebApp {
         }
     }
 
-    fn viewer_page(&mut self, ctx: &egui::Context) {
+    fn viewer_page(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         let t = ctx.input(|i| i.time);
         let codes = self.codes_header();
         let icons_done = self.icons_state == 2;
@@ -748,7 +750,7 @@ impl WebApp {
         if o.live {
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
-        egui::TopBottomPanel::top("viewer_nav").show(ctx, |ui| {
+        egui::Panel::top("viewer_nav").show(ui, |ui| {
             ui.horizontal(|ui| {
                 back = ui.button("\u{2B05} Battles").clicked();
                 ui.label(&o.viewer.title);
@@ -785,12 +787,12 @@ impl WebApp {
             });
         });
         if let Some(e) = &o.error {
-            egui::CentralPanel::default().show(ctx, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 ui.add_space(30.0);
                 ui.vertical_centered(|ui| ui.label(RichText::new(e).color(Color32::from_rgb(255, 140, 120))));
             });
         } else if !o.loaded {
-            egui::CentralPanel::default().show(ctx, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 ui.add_space(30.0);
                 ui.vertical_centered(|ui| {
                     ui.spinner();
@@ -809,7 +811,7 @@ impl WebApp {
                 });
             });
         } else {
-            o.viewer.ui(ctx);
+            o.viewer.ui(ui);
         }
         if back {
             go("/");
@@ -824,16 +826,17 @@ impl WebApp {
 }
 
 impl eframe::App for WebApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = &ui.ctx().clone();
         self.sync_route(ctx);
         while let Ok(ev) = self.rx.try_recv() {
             self.handle(ctx, ev);
         }
         self.start_viewer();
         if self.open.is_some() {
-            self.viewer_page(ctx);
+            self.viewer_page(ui);
         } else {
-            self.battles_page(ctx);
+            self.battles_page(ui);
         }
     }
 }

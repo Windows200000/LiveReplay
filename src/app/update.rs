@@ -1,8 +1,9 @@
 //! New versions: checks the latest GitHub release (not the rolling `latest-build`), tells the
 //! user, and replaces the running program with the new one (used from the next start).
 //!
-//! The download is checked before it is used: the size and SHA-256 digest GitHub lists for the
-//! file, and that it is a program for this system. Windows: the old exe is kept as `<name>.old`
+//! The download is checked before it is used: it must come from this project's GitHub releases,
+//! match the size and SHA-256 digest GitHub lists for the file (a release without a digest is not
+//! installed), and be a program for this system. Windows: the old exe is kept as `<name>.old`
 //! until the next start (a running exe can be renamed, not overwritten). macOS / Linux: the
 //! `livereplay` file from the release's `.tar.gz` replaces the running one (allowed there).
 
@@ -14,6 +15,8 @@ use std::time::Duration;
 use sha2::Digest;
 
 const API: &str = "https://api.github.com/repos/Windows200000/LiveReplay/releases/latest";
+/// Downloads are only taken from here (unless `LIVEREPLAY_UPDATE_URL` points somewhere else, for tests).
+const DOWNLOADS: &str = "https://github.com/Windows200000/LiveReplay/releases/download/";
 /// How often a running app looks again.
 const EVERY: Duration = Duration::from_secs(6 * 3600);
 
@@ -48,7 +51,8 @@ struct Release {
     page: String,
     url: String,
     size: u64,
-    sha256: Option<String>,
+    /// Lower-case hex SHA-256 GitHub lists for the file (empty: none listed).
+    sha256: String,
 }
 
 /// This build's file on the release page.
@@ -109,12 +113,26 @@ pub fn newer(remote: &str, local: &str) -> bool {
 }
 
 fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(10)).timeout(Duration::from_secs(300)).user_agent("LiveReplay-updater").build()
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(10)))
+        .timeout_global(Some(Duration::from_secs(300)))
+        .user_agent("LiveReplay-updater")
+        .build()
+        .into()
 }
 
 fn latest() -> Result<Option<Release>, String> {
     let url = std::env::var("LIVEREPLAY_UPDATE_URL").unwrap_or_else(|_| API.to_string());
-    let j: serde_json::Value = agent().get(&url).set("Accept", "application/vnd.github+json").call().map_err(|e| e.to_string())?.into_json().map_err(|e| e.to_string())?;
+    let j: serde_json::Value = agent()
+        .get(&url)
+        .header("Accept", "application/vnd.github+json")
+        .call()
+        .map_err(|e| e.to_string())?
+        .body_mut()
+        .with_config()
+        .limit(16 << 20)
+        .read_json()
+        .map_err(|e| e.to_string())?;
     let tag = j["tag_name"].as_str().unwrap_or_default();
     if !newer(tag, env!("CARGO_PKG_VERSION")) {
         return Ok(None);
@@ -125,7 +143,7 @@ fn latest() -> Result<Option<Release>, String> {
         page: j["html_url"].as_str().unwrap_or("https://github.com/Windows200000/LiveReplay/releases/latest").to_string(),
         url: asset.and_then(|a| a["browser_download_url"].as_str()).unwrap_or_default().to_string(),
         size: asset.and_then(|a| a["size"].as_u64()).unwrap_or(0),
-        sha256: asset.and_then(|a| a["digest"].as_str()).and_then(|d| d.strip_prefix("sha256:")).map(str::to_lowercase),
+        sha256: asset.and_then(|a| a["digest"].as_str()).and_then(|d| d.strip_prefix("sha256:")).map(str::to_lowercase).unwrap_or_default(),
     }))
 }
 
@@ -134,17 +152,21 @@ fn install(r: &Release) -> Result<(), String> {
     if r.url.is_empty() {
         return Err("no download for this system in the release".into());
     }
+    if !trusted_download(&r.url) {
+        return Err("the download is not from this project's releases".into());
+    }
+    if r.sha256.len() != 64 || !r.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("the release lists no checksum for the download".into());
+    }
     let mut body = Vec::new();
     use std::io::Read;
-    agent().get(&r.url).call().map_err(|e| e.to_string())?.into_reader().take(256 << 20).read_to_end(&mut body).map_err(|e| e.to_string())?;
+    agent().get(&r.url).call().map_err(|e| e.to_string())?.into_body().into_reader().take(256 << 20).read_to_end(&mut body).map_err(|e| e.to_string())?;
     if r.size != 0 && body.len() as u64 != r.size {
         return Err("download incomplete".into());
     }
-    if let Some(want) = &r.sha256 {
-        let got: String = sha2::Sha256::digest(&body).iter().map(|b| format!("{b:02x}")).collect();
-        if &got != want {
-            return Err("download damaged (checksum differs)".into());
-        }
+    let got: String = sha2::Sha256::digest(&body).iter().map(|b| format!("{b:02x}")).collect();
+    if got != r.sha256 {
+        return Err("download damaged (checksum differs)".into());
     }
     let program = if r.url.ends_with(".tar.gz") { from_tar_gz(&body)? } else { body };
     if !is_program(&program) {
@@ -152,6 +174,11 @@ fn install(r: &Release) -> Result<(), String> {
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     replace_exe(&exe, &program)
+}
+
+/// Only this project's GitHub release files (any download URL when testing with `LIVEREPLAY_UPDATE_URL`).
+fn trusted_download(url: &str) -> bool {
+    std::env::var("LIVEREPLAY_UPDATE_URL").is_ok() || (url.starts_with(DOWNLOADS) && !url.contains(".."))
 }
 
 /// macOS / Linux: the new file is written next to it and renamed over it (the running program

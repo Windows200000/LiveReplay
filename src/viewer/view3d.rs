@@ -159,7 +159,7 @@ unsafe fn upload_texture(gl: &glow::Context, src: &TexSrc, clamp: bool) -> Optio
         TexSrc::Rgba(img) => Some(img),
     };
     if let Some(img) = img {
-        gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, img.width as i32, img.height as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, Some(&img.rgba));
+        gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, img.width as i32, img.height as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(Some(&img.rgba)));
         gl.generate_mipmap(glow::TEXTURE_2D);
     }
     gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR_MIPMAP_LINEAR as i32);

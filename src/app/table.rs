@@ -182,11 +182,11 @@ impl Table {
                 let label_rect = Rect::from_min_max(cell_rect.min, Pos2::new(funnel_rect.left() - 2.0, cell_rect.max.y));
                 let active = sort.0 == c;
                 let arrow = if !active { "" } else if sort.1 { " \u{2B07}" } else { " \u{2B06}" };
-                let label = egui::SelectableLabel::new(active, RichText::new(format!("{name}{arrow}")).strong());
+                let label = egui::Button::selectable(active, RichText::new(format!("{name}{arrow}")).strong());
                 if ui.put(label_rect, label).on_hover_text("Sort").clicked() {
                     action = Action::Sort(c, if active { !sort.1 } else { matches!(c, DATE | DAMAGE) });
                 }
-                let resp = ui.interact(funnel_rect, ui.id().with(("filter", c)), Sense::click()).on_hover_text("Filter");
+                let resp = ui.interact(funnel_rect, ui.scope_id().with(("filter", c)), Sense::click()).on_hover_text("Filter");
                 let color = if self.is_filtered(c) {
                     theme::ACCENT
                 } else if resp.hovered() {
@@ -195,14 +195,14 @@ impl Table {
                     theme::MUTED
                 };
                 funnel(ui.painter(), funnel_rect.center(), 6.0, color);
-                let popup_id = ui.id().with(("filter_popup", c));
-                if resp.clicked() {
-                    if !ui.memory(|m| m.is_popup_open(popup_id)) {
-                        self.focus_search = Some(c);
-                    }
-                    ui.memory_mut(|m| m.toggle_popup(popup_id));
+                let popup_id = ui.scope_id().with(("filter_popup", c));
+                if resp.clicked() && !egui::Popup::is_id_open(ui.ctx(), popup_id) {
+                    self.focus_search = Some(c);
                 }
-                egui::popup::popup_below_widget(ui, popup_id, &resp, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| self.filter_popup(ui, c, replays));
+                egui::Popup::from_toggle_button_response(&resp)
+                    .id(popup_id)
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show(|ui| self.filter_popup(ui, c, replays));
             }
             ui.separator();
 
@@ -233,7 +233,7 @@ impl Table {
                         if hovered && pointer.map(|pt| cr.contains(pt)).unwrap_or(false) {
                             hovered_col = Some(c);
                             p.rect_filled(cr.shrink(1.0), 4.0, Color32::from_white_alpha(14));
-                            p.rect_stroke(cr.shrink(1.0), 4.0, Stroke::new(1.0_f32, theme::ACCENT.gamma_multiply(0.5)));
+                            p.rect_stroke(cr.shrink(1.0), 4.0, Stroke::new(1.0_f32, theme::ACCENT.gamma_multiply(0.5)), egui::StrokeKind::Middle);
                         }
                         let text = cell(info, c);
                         let galley = p.layout_no_wrap(text, egui::FontId::proportional(13.5), if is_sel { theme::TEXT } else { Color32::from_gray(205) });
@@ -254,43 +254,43 @@ impl Table {
                         let short: String = value.chars().take(32).collect();
                         if ui.button(format!("Filter by {} = {short}", COLUMNS[col])).clicked() {
                             self.filter_by_value(col, value.clone());
-                            ui.close_menu();
+                            ui.close();
                         }
                         if self.is_filtered(col) && ui.button(format!("Clear {} filter", COLUMNS[col])).clicked() {
                             self.clear(col);
-                            ui.close_menu();
+                            ui.close();
                         }
                         ui.separator();
                         if ui.button(format!("Sort by {} \u{2B06}", COLUMNS[col])).clicked() {
                             action = Action::Sort(col, false);
-                            ui.close_menu();
+                            ui.close();
                         }
                         if ui.button(format!("Sort by {} \u{2B07}", COLUMNS[col])).clicked() {
                             action = Action::Sort(col, true);
-                            ui.close_menu();
+                            ui.close();
                         }
                         ui.separator();
                         if ui.button("Open minimap replay").clicked() {
                             action = Action::Open(info.path.clone());
-                            ui.close_menu();
+                            ui.close();
                         }
                         ui.separator();
                         if ui.button("Upload to wot.arne.my").clicked() {
                             action = Action::Upload(vec![info.path.clone()]);
-                            ui.close_menu();
+                            ui.close();
                         }
                         let shown: Vec<String> = replays.iter().filter(|r| self.passes(r)).map(|r| r.path.clone()).collect();
                         if shown.len() > 1 && ui.button(format!("Upload all {} shown replays", shown.len())).clicked() {
                             action = Action::Upload(shown);
-                            ui.close_menu();
+                            ui.close();
                         }
                         if ui.button("Copy web link").clicked() {
                             action = Action::CopyLink(info.path.clone());
-                            ui.close_menu();
+                            ui.close();
                         }
                         if ui.button("Delete from server").clicked() {
                             action = Action::DeleteUpload(info.path.clone());
-                            ui.close_menu();
+                            ui.close();
                         }
                     });
                 }
@@ -429,7 +429,7 @@ impl Table {
             let slot = first + d - 1;
             let r = Rect::from_min_size(Pos2::new(rect.left() + (slot % 7) as f32 * cell_sz, rect.top() + (1 + slot / 7) as f32 * cell_sz), Vec2::splat(cell_sz)).shrink(2.0);
             let day = (y, m, d);
-            let resp = ui.interact(r, ui.id().with(("day", y, m, d)), Sense::click_and_drag());
+            let resp = ui.interact(r, ui.scope_id().with(("day", y, m, d)), Sense::click_and_drag());
             if resp.drag_started() || (resp.is_pointer_button_down_on() && self.cal_drag.is_none()) {
                 self.cal_drag = Some(day);
                 self.dates = Some((day, day));
