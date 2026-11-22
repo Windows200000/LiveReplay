@@ -1,7 +1,8 @@
 # Builds the desktop app for Windows, Linux and macOS (x64 + arm64), checks the server and web
 # viewer, and builds the Docker image. Artifacts: one desktop binary per platform.
-# Publishing: every push to main replaces the files of the `latest-build` pre-release; a `v*` tag
-# creates a release with the same files.
+# Publishing: every push to main replaces the files of the `latest-build` pre-release. When the
+# version in Cargo.toml has no release yet, that push also creates the tag `v<version>` and the
+# release (so a release is: raise the version, push to main). Pushing a `v*` tag by hand works too.
 name: build
 
 on:
@@ -74,6 +75,10 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: Cargo.toml
+          sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
@@ -98,6 +103,18 @@ jobs:
           gh release upload latest-build dist/* --clobber
           gh release edit latest-build --prerelease --title "Latest build" --notes "Latest build of LiveReplay, commit $short. Replaced with every push to main. Windows: .exe; Linux and macOS: .tar.gz (the app inside is unsigned — on macOS right-click → Open the first time). Third-party licences: THIRD_PARTY_LICENSES.md."
       - name: Versioned release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* --title "LiveReplay ${GITHUB_REF_NAME#v}" --notes "LiveReplay ${GITHUB_REF_NAME#v}. Windows: .exe; Linux and macOS: .tar.gz (the app inside is unsigned — on macOS right-click → Open the first time). Third-party licences: THIRD_PARTY_LICENSES.md." --latest
+          if [ "${GITHUB_REF#refs/tags/}" != "$GITHUB_REF" ]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            # The app's version (the [package] of the root Cargo.toml).
+            version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+            tag="v$version"
+            if [ -z "$version" ] || gh release view "$tag" > /dev/null 2>&1; then
+              echo "release $tag exists already: nothing to publish"
+              exit 0
+            fi
+          fi
+          # Creates the tag at this commit when it doesn't exist yet.
+          gh release create "$tag" dist/* --target "$GITHUB_SHA" --title "LiveReplay ${tag#v}" --notes "LiveReplay ${tag#v}. Windows: .exe; Linux and macOS: .tar.gz (the app inside is unsigned — on macOS right-click → Open the first time). Third-party licences: THIRD_PARTY_LICENSES.md." --latest
