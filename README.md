@@ -72,22 +72,36 @@ stores and serves it, and the web viewer (the same viewer compiled to WebAssembl
   Data lives in the `livereplay-data` volume, or in any host folder when `DATA_PATH` is set in `.env` (e.g. a separate drive:
   `DATA_PATH=/mnt/data/livereplay`; create it and `sudo chown -R 1000:1000` it first, the server runs as uid 1000). Back it up. Without Docker: `cargo build --release -p livereplay-server`,
   `sh web/build.sh`, then run `livereplay-server` (env `BIND`, `DATA_DIR`, `WEB_DIR`, `THREADS`, plus the ones above).
-* Limits (env, optional): `MAX_BATTLES_PER_DAY` (300 per uploader), `MAX_NEW_BATTLES_PER_DAY` (3000 for the whole server),
-  `MAX_KEY_MB` (2048), `MAX_TOTAL_GB` (50, battles + original replays + shared game data).
+* Limits (env, optional). Uploader keys cost nothing to make, so the limits that matter are per visitor (network
+  address; IPv6 per /64), counted in memory only with a salted hash, forgotten within a day: requests
+  `RATE_PER_SEC` (25) / `RATE_BURST` (600), new battles `IP_BATTLES_PER_DAY` (400), new player names `IP_NAMES_PER_DAY`
+  (10), viewing codes `IP_CODES_PER_DAY` (60), new game-data names `IP_NEW_ASSETS_PER_DAY` (3000), uploaded MB
+  `IP_UPLOAD_MB_PER_DAY` (4096); at most 20 different wrong viewing codes per hour (then its codes are ignored, so codes
+  can't be guessed). Per uploader key: `MAX_BATTLES_PER_DAY` (300), `MAX_KEY_MB` (2048), 10 player names; whole server:
+  `MAX_TOTAL_GB` (50, battles + original replays + shared game data). Behind the proxy the visitor is the last
+  `X-Forwarded-For` entry (only trusted from private / loopback addresses, i.e. Caddy). Battles that never got data are
+  removed after an hour.
+* Small machine: uploads go straight to disk and downloads are streamed from it (measured: 4 parallel 60 MB uploads and
+  downloads, 9 MB peak memory); no large file is read or written while the shared state is locked; public battle lists
+  come from a 2 s cache. Container: 1 GB memory, 1.5 CPUs.
 * Security: the server never runs or interprets uploads. Battle data, original replays and game data are stored as opaque
   bytes and only served back as `application/octet-stream` with `nosniff` and a sandbox CSP; the small JSON descriptions
   are parsed into fixed types and every text in them is bounded and stripped of control characters; header values with
-  control characters are never sent. Pages have a strict CSP (own scripts and the wasm only, no framing). Shared game
-  data can only be replaced by the uploader who first sent it (game updates);
-  `curl -X DELETE -H "X-Livereplay-Admin: $ADMIN_TOKEN" https://<domain>/api/admin/assets` resets it all (the next
-  uploads send it again). Container: read-only, no capabilities, no privilege gain, 2 GB memory; Caddy limits request
-  bodies (70 MB) and slow clients.
+  control characters are never sent. Pages have a strict CSP (own scripts and the wasm only, no framing). Container:
+  read-only, no capabilities, no privilege gain; Caddy (always the newest 2.x) limits request bodies (70 MB) and slow clients.
+* Shared game data is voted on: the first upload is served at once; a different upload of the same asset is kept as a
+  candidate (3 copies at most) and every uploader key has one vote per asset (its latest upload or vote). The copy with
+  the most votes is served. Votes count only from keys that uploaded a battle with data, from at most 4 keys per visitor
+  and day, and expire after 120 days (so new game data takes over after an update as players' apps vote for it).
+* Operator page: `https://<domain>/admin` (type `ADMIN_TOKEN`): overview (biggest uploaders, newest battles, contested
+  game data, blocked keys), delete a battle, delete a player's uploads and free the name (optionally every battle the
+  player is in: objection from a player who didn't upload), block an uploader key (removes everything it uploaded; also
+  by player name or battle), delete one or all game data. Same as `curl` calls, see `api/src/lib.rs`.
 * Privacy (GDPR): the policy is served at `/privacy` from the operator settings. No IP addresses or access logs, no cookies,
   no tracking. Uploaders consent in the app before the first upload and can download (`GET /api/me`) or delete
-  (`DELETE /api/me`, `DELETE /api/battles/<id>`) their data from Settings. Removal request from a player who didn't upload:
-  `curl -X DELETE -H "X-Livereplay-Admin: $ADMIN_TOKEN" https://<domain>/api/admin/players/<player name>` deletes every
-  battle with that name (answer within one month) and frees the name, so the next uploader of it claims it (also the fix
-  when "this player name belongs to another uploader" is wrong, e.g. after a lost upload key).
+  (`DELETE /api/me`, `DELETE /api/battles/<id>`) their data from Settings. "This player name belongs to another
+  uploader" (also shown with `OPERATOR_CONTACT`): the operator deletes that player's uploads on `/admin`, which frees the
+  name for the next uploader.
 * API: see `api/src/lib.rs`.
 * Nothing from the game is part of the server or image. The minimap pictures, map layouts and icons the web viewer needs are
   uploaded by the desktop app from the player's own game files.

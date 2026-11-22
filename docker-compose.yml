@@ -15,11 +15,13 @@ services:
     build: .
     restart: unless-stopped
     # Hardening: nothing in the container can be changed except the data folder, no Linux
-    # capabilities, no privilege gain, bounded memory.
+    # capabilities, no privilege gain. Bounded memory and CPU: it shares a small machine (uploads
+    # and downloads are streamed from disk; the server itself needs a few MB plus its index).
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    mem_limit: 2g
+    mem_limit: 1g
+    cpus: 1.5
     environment:
       - OPERATOR_NAME=${OPERATOR_NAME:-}
       - OPERATOR_CONTACT=${OPERATOR_CONTACT:-}
@@ -30,9 +32,12 @@ services:
       # Battles, codes, uploaded map data: back this up. A host folder when DATA_PATH is set.
       - ${DATA_PATH:-livereplay-data}:/data
   caddy:
+    # Always the newest Caddy 2 (security fixes, e.g. 2.11.4) on every `docker compose up`.
     image: caddy:2
+    pull_policy: always
     restart: unless-stopped
     security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
     ports:
       - "80:80"
       - "443:443"

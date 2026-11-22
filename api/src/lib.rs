@@ -20,13 +20,24 @@
 //!   `DELETE /api/battles/{id}` K: delete one battle (GDPR access / erasure)
 //! - `POST /api/asset-expect` K, body: JSON list of asset names about to be uploaded (shown as
 //!   "expected" for 10 minutes); `GET /api/asset-status?names=a,b` -> name -> [`AssetStatus`]
-//! - `DELETE /api/admin/assets` with [`ADMIN_HEADER`]: remove all shared game data (clients upload it again)
-//! - `DELETE /api/admin/players/{name}` with [`ADMIN_HEADER`]: remove every battle a player is in
-//!   and free the name for the next uploader
-//!   (removal requests from players who didn't upload)
-//! - `GET /privacy`: privacy policy
+//! - `GET /privacy`: privacy policy;  `GET /api/info` -> [`ServerInfo`]
 //! - `GET /api/assets/{name}` / `PUT /api/assets/{name}?version=V` K: game data the web viewer
-//!   needs (map packs, icons), uploaded by clients — never part of the repository.
+//!   needs (map packs, icons), uploaded by clients — never part of the repository. The served
+//!   copy's SHA-256 is in [`HASH_HEADER`]. Different uploads of one asset are votes: each key has
+//!   one vote per asset (its latest), and the copy with the most votes is served.
+//! - `POST /api/assets/{name}/vote?version=V&hash=H` K -> [`AssetVote`]: vote for the copy with
+//!   this hash without sending it again (`upload`: the server doesn't have it; send it with `PUT`)
+//!
+//! Operator (with [`ADMIN_HEADER`]; the page `/admin` does all of this):
+//! - `GET /api/admin/overview`: counts, biggest uploaders, contested assets, blocked keys
+//! - `DELETE /api/admin/battles/{id}`: remove one battle
+//! - `DELETE /api/admin/players/{realm:name}`: remove the battles uploaded for this player name
+//!   (whatever key sent them) and free the name; `?everywhere=1`: also every battle others
+//!   uploaded that the player is in (objection by a player who didn't upload)
+//! - `POST /api/admin/block?battle=ID` / `?player=REALM:name` / `?key=HASHPREFIX`: block the
+//!   uploader key and remove everything it uploaded;  `DELETE /api/admin/block/{hashprefix}`
+//! - `DELETE /api/admin/assets/{name}`, `DELETE /api/admin/assets`: remove shared game data
+//!   (clients upload it again)
 
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +49,26 @@ pub const CODES_HEADER: &str = "X-Livereplay-Codes";
 pub const GEN_HEADER: &str = "X-Livereplay-Gen";
 /// Version of an asset (client version it came from).
 pub const VERSION_HEADER: &str = "X-Livereplay-Version";
+/// SHA-256 (hex) of the asset copy the server serves.
+pub const HASH_HEADER: &str = "X-Livereplay-Hash";
+
+/// Answer to an asset vote.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AssetVote {
+    /// The server doesn't have this copy: upload it (`PUT`), which also counts as the vote.
+    pub upload: bool,
+    /// The vote counts (keys that uploaded no battle yet, and many keys from one place, don't).
+    pub counted: bool,
+}
+
+/// About this server (`GET /api/info`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServerInfo {
+    /// The operator's contact (e-mail or URL) for data and player-name requests; may be empty.
+    pub contact: String,
+}
 
 /// Where a shared asset stands (`GET /api/asset-status?names=a,b`): "ready" (with `size`),
 /// "uploading" (`received` of `total` bytes so far), "expected" (an app announced it is about to

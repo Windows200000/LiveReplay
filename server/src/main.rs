@@ -6,59 +6,81 @@
 //! proxy (see `docker-compose.yml`).
 //!
 //! Environment: `BIND` (default `0.0.0.0:8080`), `DATA_DIR` (default `data`), `WEB_DIR`
-//! (default `web-dist`), `THREADS` (default 16).
+//! (default `web-dist`), `THREADS` (default 16), `ADMIN_TOKEN`, the limits below and in `guard`.
 //!
 //! Nothing uploaded is ever run or interpreted by the server: battle data, original replays and
 //! assets are stored as opaque bytes and served back as `application/octet-stream` (with
 //! `nosniff` and a sandbox CSP); only small JSON descriptions are parsed, into fixed types, and
 //! every text in them is bounded and stripped of control characters.
 //!
+//! Made for a small shared machine: large uploads go straight to disk and large downloads are
+//! streamed from it, and no large file is read or written while the shared state is locked.
+//!
 //! Data folder: `claims.json` (player name -> uploader key hash), `codes.json` (code hash ->
-//! owner key hash + expiry), `battles/<id>.json` + `battles/<id>.bin`, `assets/<name>.bin` + `.json`.
+//! owner key hash + expiry), `blocked.json` (blocked key hashes), `battles/<id>.json` +
+//! `battles/<id>.bin` (+ `.wotreplay`), `assets/` (see `assets`), `tmp/` (uploads in progress).
 
-use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::collections::{HashMap, HashSet};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use livereplay_api::*;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
-use tiny_http::{Header, Method, Request, Response, Server};
+use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
+mod admin;
+mod assets;
+mod guard;
 mod privacy;
+
+use assets::{AssetMeta, Copy};
+use guard::{Daily, Guard, Visitor};
 
 /// A live battle not updated for this long is no longer live (the app sends every 4 s; it
 /// crashed, was closed, or the battle ended without a final upload).
 const STALE_SECS: u64 = 90;
 const MAX_BODY: usize = 16 << 20;
-const MAX_ASSET: usize = 64 << 20;
+const MAX_ASSET: u64 = 64 << 20;
 /// Largest original replay file accepted.
-const MAX_REPLAY: usize = 64 << 20;
+const MAX_REPLAY: u64 = 64 << 20;
 const MAX_BATTLE: u64 = 24 << 20;
 const PER_PAGE: usize = 50;
 /// Abuse limits per uploader key (overridable: `MAX_BATTLES_PER_DAY`, `MAX_KEY_MB`, `MAX_TOTAL_GB`).
+/// Keys cost nothing to make, so the limits that matter are per visitor (see `guard`).
 const BATTLES_PER_DAY: usize = 300;
 const KEY_MB: u64 = 2048;
 const TOTAL_GB: u64 = 50;
 /// Player names one key may claim.
 const CLAIMS_PER_KEY: usize = 10;
-/// Server-wide caps (keys cost nothing to make, so per-key limits alone don't bound anything):
-/// new battles per day (`MAX_NEW_BATTLES_PER_DAY`), player names, viewing codes, shared assets.
-const NEW_BATTLES_PER_DAY: u64 = 3000;
-const MAX_CLAIMS: usize = 20_000;
-const MAX_CODES: usize = 20_000;
-const MAX_ASSETS: usize = 20_000;
+/// Backstops for memory (far above normal use; the per-visitor limits bound how fast they fill).
+const MAX_CLAIMS: usize = 500_000;
+const MAX_CODES: usize = 200_000;
+const MAX_ASSETS: usize = 200_000;
 /// Longest text kept from a battle's description fields.
 const MAX_TEXT: usize = 100;
+/// Viewing codes looked at per request.
+const CODES_PER_REQUEST: usize = 20;
+/// A battle that never got any data is removed after this long.
+const EMPTY_BATTLE_SECS: u64 = 3600;
+/// Public battle lists are answered from a cache this old at most.
+const LIST_CACHE: Duration = Duration::from_secs(2);
+/// Storage use is counted again at most this often (and kept up to date in between).
+const USAGE_CACHE: Duration = Duration::from_secs(30);
 
 fn env_num(k: &str, default: u64) -> u64 {
     std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
-fn now() -> u64 {
+pub(crate) fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// The operator's contact (`OPERATOR_CONTACT`), empty if not set.
+fn contact() -> String {
+    std::env::var("OPERATOR_CONTACT").unwrap_or_default().trim().to_string()
 }
 
 /// A battle date as the game writes it ("dd.mm.yyyy hh:mm:ss", the player's local time) in
@@ -66,13 +88,16 @@ fn now() -> u64 {
 fn date_secs(d: &str) -> Option<i64> {
     let n: Vec<i64> = d.split(|c: char| !c.is_ascii_digit()).filter(|s| !s.is_empty()).map(|s| s.parse().ok()).collect::<Option<_>>()?;
     let [day, m, y, h, mi, s] = n[..] else { return None };
+    if !(1..=12).contains(&m) || !(1..=31).contains(&day) || !(0..=9999).contains(&y) {
+        return None;
+    }
     // Days since 1970-01-01 (Howard Hinnant's days_from_civil).
     let y = y - i64::from(m <= 2);
     let era = y.div_euclid(400);
     let yoe = y - era * 400;
     let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    Some((era * 146_097 + doe - 719_468) * 86400 + h * 3600 + mi * 60 + s)
+    Some((era * 146_097 + doe - 719_468) * 86400 + h.min(99) * 3600 + mi.min(99) * 60 + s.min(99))
 }
 
 /// Text from a request as stored: no control characters, at most `max` characters.
@@ -104,47 +129,26 @@ fn is_admin(rq: &Request) -> bool {
     token.len() >= 16 && header(rq, ADMIN_HEADER).is_some_and(|h| same_secret(h, &token))
 }
 
-/// Bytes stored for one uploader and for the whole server (battle data, original replays, assets).
-fn usage(st: &State, owner: &str) -> (u64, u64) {
-    let (mut mine, mut total) = (0u64, 0u64);
-    for s in st.battles.values() {
-        let n = s.info.size + s.info.replay_size;
-        total += n;
-        if s.owner == owner {
-            mine += n;
-        }
-    }
-    for a in st.assets.values() {
-        total += a.size;
-        if a.owner == owner {
-            mine += a.size;
-        }
-    }
-    (mine, total)
-}
-
-/// `None` when `extra` more bytes fit the uploader's and the server's storage limits.
-fn over_limit(st: &State, owner: &str, extra: u64) -> Option<Reply> {
-    let (mine, total) = usage(st, owner);
-    if mine + extra > env_num("MAX_KEY_MB", KEY_MB) << 20 {
-        return Some(Reply::err(507, "storage limit for this uploader reached"));
-    }
-    if total + extra > env_num("MAX_TOTAL_GB", TOTAL_GB) << 30 {
-        return Some(Reply::err(507, "server storage full"));
-    }
-    None
-}
-
 fn sha_hex(b: &[u8]) -> String {
-    sha2::Sha256::digest(b).iter().map(|x| format!("{x:02x}")).collect()
+    hex(&sha2::Sha256::digest(b))
 }
 
-/// Random token from an unambiguous alphabet (no 0/O, 1/I/L).
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// Random token from an unambiguous alphabet (no 0/O, 1/I/L). Unbiased: bytes that would make
+/// some letters more likely are skipped.
 fn token(n: usize) -> String {
     const A: &[u8] = b"23456789ABCDEFGHJKMNPQRSTUVWXYZ";
-    let mut buf = vec![0u8; n];
-    getrandom::getrandom(&mut buf).expect("os random");
-    buf.iter().map(|b| A[*b as usize % A.len()] as char).collect()
+    let limit = 256 - 256 % A.len();
+    let mut out = String::with_capacity(n);
+    while out.len() < n {
+        let mut buf = [0u8; 32];
+        getrandom::fill(&mut buf).expect("os random");
+        out.extend(buf.iter().filter(|b| (**b as usize) < limit).map(|b| A[*b as usize % A.len()] as char).take(n - out.len()));
+    }
+    out
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -171,14 +175,12 @@ struct Stored {
     arena_id: u64,
 }
 
-#[derive(Serialize, Deserialize, Clone, Default)]
-struct AssetMeta {
-    version: String,
-    size: u64,
-    /// Hash of the key that first uploaded it: only that key may replace it (game updates); the
-    /// operator can reset assets (`DELETE /api/admin/assets`). Empty for assets from before.
-    #[serde(default)]
-    owner: String,
+/// Files that changed in memory and are written after the request.
+#[derive(Default, Clone, Copy)]
+struct Dirty {
+    claims: bool,
+    codes: bool,
+    blocked: bool,
 }
 
 #[derive(Default)]
@@ -187,52 +189,28 @@ struct State {
     codes: HashMap<String, Code>,
     battles: HashMap<String, Stored>,
     assets: HashMap<String, AssetMeta>,
+    /// Blocked uploader keys (hashes).
+    blocked: HashSet<String>,
     /// Asset uploads in progress: name -> (bytes received, bytes in total). Memory only.
     uploading: HashMap<String, (u64, u64)>,
     /// Assets an app announced it is about to upload: name -> until (Unix seconds). Memory only.
     expected: HashMap<String, u64>,
+    dirty: Dirty,
+    /// Changes whenever a battle goes away (cached lists are then out of date at once).
+    epoch: u64,
 }
 
-/// Removes an asset from "uploading" however the upload ends.
-struct Uploading<'a>(&'a App, String);
-
-impl Drop for Uploading<'_> {
-    fn drop(&mut self) {
-        self.0.st().uploading.remove(&self.1);
-    }
-}
-
-/// Read an asset upload, keeping its progress visible to `/api/asset-status`.
-fn read_asset(app: &App, rq: &mut Request, name: &str) -> Result<Vec<u8>, Reply> {
-    let total = rq.body_length().unwrap_or(0) as u64;
-    if total > MAX_ASSET as u64 {
-        return Err(Reply::err(413, "too large"));
-    }
-    app.st().uploading.insert(name.to_string(), (0, total));
-    let _guard = Uploading(app, name.to_string());
-    let mut body = Vec::with_capacity(total as usize);
-    let mut buf = vec![0u8; 256 << 10];
-    let reader = rq.as_reader();
-    loop {
-        let n = reader.read(&mut buf).map_err(|_| Reply::err(400, "bad body"))?;
-        if n == 0 {
-            break;
-        }
-        body.extend_from_slice(&buf[..n]);
-        if body.len() > MAX_ASSET {
-            return Err(Reply::err(413, "too large"));
-        }
-        if let Some(u) = app.st().uploading.get_mut(name) {
-            u.0 = body.len() as u64;
-        }
-    }
-    Ok(body)
+/// Storage in use, per uploader key and in total.
+#[derive(Default)]
+struct Usage {
+    per_owner: HashMap<String, u64>,
+    total: u64,
 }
 
 struct StaticFile {
-    body: Vec<u8>,
-    gz: Option<Vec<u8>>,
-    br: Option<Vec<u8>>,
+    body: Arc<[u8]>,
+    gz: Option<Arc<[u8]>>,
+    br: Option<Arc<[u8]>>,
     etag: String,
     ctype: &'static str,
 }
@@ -241,24 +219,35 @@ struct App {
     data: PathBuf,
     state: Mutex<State>,
     web: HashMap<String, StaticFile>,
+    guard: Guard,
+    /// Held while writing the JSON files, so an older copy never overwrites a newer one.
+    persist: Mutex<()>,
+    /// One lock per battle for writing its data file (outside the state lock).
+    io_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Public battle lists: query -> (epoch, when, JSON).
+    list_cache: Mutex<HashMap<String, (u64, Instant, Arc<[u8]>)>>,
+    usage: Mutex<Option<(Instant, Usage)>>,
 }
 
 fn read_json<T: for<'de> Deserialize<'de> + Default>(p: &Path) -> T {
     std::fs::read(p).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
-fn write_json<T: Serialize>(p: &Path, v: &T) {
-    // Write to a temp file and rename, so a crash never leaves half a file.
+/// Write a file through a temp file and a rename, so a crash never leaves half a file.
+fn write_atomic(p: &Path, b: &[u8]) -> std::io::Result<()> {
     let tmp = p.with_extension("tmp");
+    std::fs::write(&tmp, b)?;
+    std::fs::rename(&tmp, p)
+}
+
+fn write_json<T: Serialize>(p: &Path, v: &T) {
     if let Ok(b) = serde_json::to_vec(v) {
-        if std::fs::write(&tmp, b).is_ok() {
-            let _ = std::fs::rename(&tmp, p);
-        }
+        let _ = write_atomic(p, &b);
     }
 }
 
-fn gzip(b: &[u8]) -> Vec<u8> {
-    let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+fn gzip(b: &[u8], level: u32) -> Vec<u8> {
+    let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(level));
     let _ = e.write_all(b);
     e.finish().unwrap_or_default()
 }
@@ -284,12 +273,45 @@ fn content_type(p: &str) -> &'static str {
     }
 }
 
+/// An upload being received into `tmp/`; deleted unless it is moved into place.
+struct TempFile(Option<PathBuf>);
+
+impl TempFile {
+    /// Move it to `dest` (replacing what is there).
+    fn place(mut self, dest: &Path) -> std::io::Result<()> {
+        let p = self.0.take().unwrap_or_default();
+        std::fs::rename(&p, dest).inspect_err(|_| {
+            let _ = std::fs::remove_file(&p);
+        })
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        if let Some(p) = &self.0 {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+/// A received upload: where it is, its size, its SHA-256 and its first bytes.
+struct Received {
+    file: TempFile,
+    size: u64,
+    hash: String,
+    head: Vec<u8>,
+}
+
 impl App {
     fn load(data: PathBuf, web_dir: &Path) -> Self {
-        for d in ["battles", "assets"] {
+        for d in ["battles", "assets", "assets/candidates", "tmp"] {
             let _ = std::fs::create_dir_all(data.join(d));
         }
-        let mut st = State { codes: read_json(&data.join("codes.json")), ..Default::default() };
+        // Uploads a restart cut off.
+        for e in std::fs::read_dir(data.join("tmp")).into_iter().flatten().flatten() {
+            let _ = std::fs::remove_file(e.path());
+        }
+        let mut st = State { codes: read_json(&data.join("codes.json")), blocked: read_json(&data.join("blocked.json")), ..Default::default() };
         // Claims in the normalised form (older files had the name as uploaded); the first one wins.
         let old: HashMap<String, String> = read_json(&data.join("claims.json"));
         let mut old: Vec<(String, String)> = old.into_iter().collect();
@@ -329,10 +351,10 @@ impl App {
                 let rel = p.strip_prefix(web_dir).unwrap_or(&p).to_string_lossy().replace('\\', "/");
                 let ctype = content_type(&rel);
                 let compressible = !ctype.starts_with("image/png") && body.len() > 512;
-                let gz = compressible.then(|| gzip(&body));
-                let br = compressible.then(|| brotli_bytes(&body));
+                let gz = compressible.then(|| gzip(&body, 9).into());
+                let br = compressible.then(|| brotli_bytes(&body).into());
                 let etag = format!("\"{}\"", &sha_hex(&body)[..16]);
-                web.insert(format!("/{rel}"), StaticFile { body, gz, br, etag, ctype });
+                web.insert(format!("/{rel}"), StaticFile { body: body.into(), gz, br, etag, ctype });
             }
         }
         let removed = remove_duplicates(&data, &mut st) + merge_same_battles(&data, &mut st);
@@ -344,7 +366,16 @@ impl App {
         st.codes.retain(|_, c| c.expires > t);
         write_json(&data.join("codes.json"), &st.codes);
         println!("loaded {} battles, {} assets, {} web files", st.battles.len(), st.assets.len(), web.len());
-        App { data, state: Mutex::new(st), web }
+        App {
+            data,
+            state: Mutex::new(st),
+            web,
+            guard: Guard::new(),
+            persist: Mutex::new(()),
+            io_locks: Mutex::new(HashMap::new()),
+            list_cache: Mutex::new(HashMap::new()),
+            usage: Mutex::new(None),
+        }
     }
 
     /// The shared state. A panic while it was held (a bug) must not take every later request down.
@@ -352,23 +383,232 @@ impl App {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Delete a battle's files and entry (caller holds the state lock).
+    /// Write the JSON files that changed (after a request, with the state unlocked while writing).
+    fn flush(&self) {
+        let _p = self.persist.lock().unwrap_or_else(|e| e.into_inner());
+        let (claims, codes, blocked) = {
+            let mut st = self.st();
+            let d = std::mem::take(&mut st.dirty);
+            (
+                d.claims.then(|| serde_json::to_vec(&st.claims).ok()).flatten(),
+                d.codes.then(|| serde_json::to_vec(&st.codes).ok()).flatten(),
+                d.blocked.then(|| serde_json::to_vec(&st.blocked).ok()).flatten(),
+            )
+        };
+        for (name, b) in [("claims.json", claims), ("codes.json", codes), ("blocked.json", blocked)] {
+            if let Some(b) = b {
+                let _ = write_atomic(&self.data.join(name), &b);
+            }
+        }
+    }
+
+    /// Delete a battle's files and entry (caller holds the state lock; deleting is quick).
     fn remove_battle(&self, st: &mut State, id: &str) -> bool {
         let dir = self.data.join("battles");
-        let _ = std::fs::remove_file(dir.join(format!("{id}.bin")));
-        let _ = std::fs::remove_file(dir.join(format!("{id}.json")));
-        let _ = std::fs::remove_file(dir.join(format!("{id}.wotreplay")));
-        st.battles.remove(id).is_some()
+        for ext in ["bin", "json", "wotreplay"] {
+            let _ = std::fs::remove_file(dir.join(format!("{id}.{ext}")));
+        }
+        st.epoch += 1;
+        if let Some(s) = st.battles.remove(id) {
+            if let Some((_, u)) = self.usage.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                let n = s.info.size + s.info.replay_size;
+                u.total = u.total.saturating_sub(n);
+                if let Some(m) = u.per_owner.get_mut(&s.owner) {
+                    *m = m.saturating_sub(n);
+                }
+            }
+            true
+        } else {
+            false
+        }
     }
 
     fn save_battle(&self, s: &Stored) {
         write_json(&self.data.join("battles").join(format!("{}.json", s.info.id)), s);
     }
+
+    fn asset_path(&self, name: &str) -> PathBuf {
+        self.data.join("assets").join(format!("{name}.bin"))
+    }
+
+    fn candidate_path(&self, name: &str, hash: &str) -> PathBuf {
+        self.data.join("assets").join("candidates").join(assets::candidate_file(name, hash))
+    }
+
+    fn save_asset(&self, name: &str, m: &AssetMeta) {
+        write_json(&self.data.join("assets").join(format!("{name}.json")), m);
+    }
+
+    /// Remove an asset with every copy (caller holds the state lock).
+    fn remove_asset(&self, st: &mut State, name: &str) {
+        if let Some(m) = st.assets.remove(name) {
+            for c in &m.others {
+                let _ = std::fs::remove_file(self.candidate_path(name, &c.hash));
+            }
+        }
+        let _ = std::fs::remove_file(self.asset_path(name));
+        let _ = std::fs::remove_file(self.data.join("assets").join(format!("{name}.json")));
+        *self.usage.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// Lock for writing one battle's data file.
+    fn io_lock(&self, id: &str) -> Arc<Mutex<()>> {
+        self.io_locks.lock().unwrap_or_else(|e| e.into_inner()).entry(id.to_string()).or_default().clone()
+    }
+
+    /// Receive a request body into `tmp/` (streamed: never all in memory), within `max` bytes and
+    /// the visitor's daily upload allowance. `progress`: show it as an asset upload in progress.
+    fn receive(&self, rq: &mut Request, v: Visitor, max: u64, progress: Option<&str>) -> Result<Received, Reply> {
+        let total = rq.body_length().unwrap_or(0) as u64;
+        if total > max {
+            return Err(Reply::err(413, "too large"));
+        }
+        if !self.guard.fits(v, Daily::Bytes, total) {
+            return Err(Reply::err(429, "upload limit reached for today"));
+        }
+        let path = self.data.join("tmp").join(format!("{}.part", token(16)));
+        let file = TempFile(Some(path.clone()));
+        let mut out = std::io::BufWriter::with_capacity(1 << 20, std::fs::File::create(&path).map_err(|_| Reply::err(500, "write failed"))?);
+        struct Progress<'a>(&'a App, Option<&'a str>);
+        impl Drop for Progress<'_> {
+            fn drop(&mut self) {
+                if let Some(n) = self.1 {
+                    self.0.st().uploading.remove(n);
+                }
+            }
+        }
+        if let Some(n) = progress {
+            self.st().uploading.insert(n.to_string(), (0, total));
+        }
+        let _progress = Progress(self, progress);
+        let mut hasher = sha2::Sha256::new();
+        let mut head = Vec::new();
+        let mut size = 0u64;
+        let mut buf = vec![0u8; 256 << 10];
+        let mut last = Instant::now();
+        let reader = rq.as_reader();
+        loop {
+            let n = reader.read(&mut buf).map_err(|_| Reply::err(400, "bad body"))?;
+            if n == 0 {
+                break;
+            }
+            size += n as u64;
+            if size > max {
+                return Err(Reply::err(413, "too large"));
+            }
+            if head.len() < 16 {
+                head.extend_from_slice(&buf[..n.min(16 - head.len())]);
+            }
+            hasher.update(&buf[..n]);
+            out.write_all(&buf[..n]).map_err(|_| Reply::err(500, "write failed"))?;
+            if let Some(name) = progress.filter(|_| last.elapsed() > Duration::from_millis(250)) {
+                last = Instant::now();
+                if let Some(u) = self.st().uploading.get_mut(name) {
+                    u.0 = size;
+                }
+            }
+        }
+        out.flush().map_err(|_| Reply::err(500, "write failed"))?;
+        drop(out);
+        if !self.guard.take(v, Daily::Bytes, size) {
+            return Err(Reply::err(429, "upload limit reached for today"));
+        }
+        Ok(Received { file, size, hash: hex(&hasher.finalize()), head })
+    }
+
+    /// Make sure the served copy of an asset has its hash (assets from before hashes were kept):
+    /// the file is read with the state unlocked.
+    fn ensure_hash(&self, name: &str) {
+        if !self.st().assets.get(name).is_some_and(|m| m.current.hash.is_empty()) {
+            return;
+        }
+        let Ok(mut f) = std::fs::File::open(self.asset_path(name)) else { return };
+        let mut h = sha2::Sha256::new();
+        let mut buf = vec![0u8; 256 << 10];
+        loop {
+            match f.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => h.update(&buf[..n]),
+                Err(_) => return,
+            }
+        }
+        let hash = hex(&h.finalize());
+        let mut st = self.st();
+        if let Some(m) = st.assets.get_mut(name).filter(|m| m.current.hash.is_empty()) {
+            m.current.hash = hash;
+            let m = m.clone();
+            self.save_asset(name, &m);
+        }
+    }
+
+    /// Serve the candidate that now has the most votes (swaps two files; state locked).
+    fn promote(&self, name: &str, m: &mut AssetMeta, i: usize) {
+        if m.current.hash.is_empty() {
+            return;
+        }
+        let (cur, cand) = (self.asset_path(name), self.candidate_path(name, &m.others[i].hash));
+        let parked = self.candidate_path(name, &m.current.hash);
+        if std::fs::rename(&cur, &parked).is_err() {
+            return;
+        }
+        if std::fs::rename(&cand, &cur).is_err() {
+            let _ = std::fs::rename(&parked, &cur);
+            return;
+        }
+        m.promote(i);
+        println!("asset {name}: now serving {} ({} votes)", &m.current.hash[..12], m.current.votes.len());
+    }
+
+    /// Whether an uploader key's asset votes count: it uploaded a battle with data (so it is a
+    /// real app with a player name), and few enough keys voted from this visitor today.
+    fn counts(&self, st: &State, v: Visitor, owner: &str) -> bool {
+        st.claims.values().any(|k| k == owner) && st.battles.values().any(|s| s.owner == owner && s.info.size > 0) && self.guard.voter(v, owner)
+    }
+
+    /// Storage use (counted again every [`USAGE_CACHE`], kept up to date in between).
+    fn over_limit(&self, st: &State, owner: &str, extra: u64) -> Option<Reply> {
+        let mut u = self.usage.lock().unwrap_or_else(|e| e.into_inner());
+        if u.as_ref().is_none_or(|(at, _)| at.elapsed() > USAGE_CACHE) {
+            *u = Some((Instant::now(), usage(st)));
+        }
+        let Some((_, u)) = u.as_mut() else { return None };
+        let mine = u.per_owner.get(owner).copied().unwrap_or(0);
+        if mine + extra > env_num("MAX_KEY_MB", KEY_MB) << 20 {
+            return Some(Reply::err(507, "storage limit for this uploader reached"));
+        }
+        if u.total + extra > env_num("MAX_TOTAL_GB", TOTAL_GB) << 30 {
+            return Some(Reply::err(507, "server storage full"));
+        }
+        *u.per_owner.entry(owner.to_string()).or_default() += extra;
+        u.total += extra;
+        None
+    }
+}
+
+/// Bytes stored per uploader and for the whole server (battle data, original replays, assets).
+fn usage(st: &State) -> Usage {
+    let mut u = Usage::default();
+    for s in st.battles.values() {
+        let n = s.info.size + s.info.replay_size;
+        u.total += n;
+        *u.per_owner.entry(s.owner.clone()).or_default() += n;
+    }
+    for c in st.assets.values().flat_map(|a| a.copies()) {
+        u.total += c.size;
+        *u.per_owner.entry(c.owner.clone()).or_default() += c.size;
+    }
+    u
+}
+
+enum Body {
+    Bytes(Arc<[u8]>),
+    /// Streamed (a file), with its length.
+    Stream(Box<dyn Read + Send>, usize),
 }
 
 struct Reply {
     status: u16,
-    body: Vec<u8>,
+    body: Body,
     ctype: &'static str,
     headers: Vec<(String, String)>,
     /// Allow gzip for this body (text).
@@ -377,12 +617,24 @@ struct Reply {
 
 impl Reply {
     fn json<T: Serialize>(v: &T) -> Self {
-        Reply { status: 200, body: serde_json::to_vec(v).unwrap_or_default(), ctype: "application/json", headers: vec![("Cache-Control".into(), "no-store".into())], compress: true }
+        Self::json_bytes(serde_json::to_vec(v).unwrap_or_default().into())
+    }
+    fn json_bytes(b: Arc<[u8]>) -> Self {
+        Reply { status: 200, body: Body::Bytes(b), ctype: "application/json", headers: vec![("Cache-Control".into(), "no-store".into())], compress: true }
     }
     fn err(status: u16, msg: &str) -> Self {
-        Reply { status, body: msg.as_bytes().to_vec(), ctype: "text/plain; charset=utf-8", headers: vec![], compress: false }
+        Reply { status, body: Body::Bytes(msg.as_bytes().into()), ctype: "text/plain; charset=utf-8", headers: vec![], compress: false }
     }
     fn bin(body: Vec<u8>) -> Self {
+        Reply { status: 200, body: Body::Bytes(body.into()), ctype: "application/octet-stream", headers: vec![], compress: false }
+    }
+    fn html(body: String) -> Self {
+        Reply { status: 200, body: Body::Bytes(body.into_bytes().into()), ctype: "text/html; charset=utf-8", headers: vec![], compress: true }
+    }
+    /// A file from `from` to `from + len`, streamed.
+    fn file(f: std::fs::File, from: u64, len: u64) -> Self {
+        let mut f = f;
+        let body = if from == 0 || f.seek(std::io::SeekFrom::Start(from)).is_ok() { Body::Stream(Box::new(f.take(len)), len as usize) } else { Body::Bytes(Arc::from(&[][..])) };
         Reply { status: 200, body, ctype: "application/octet-stream", headers: vec![], compress: false }
     }
     fn header(mut self, k: &str, v: impl Into<String>) -> Self {
@@ -396,7 +648,7 @@ fn header<'a>(rq: &'a Request, name: &str) -> Option<&'a str> {
 }
 
 fn query(q: &str, k: &str) -> Option<String> {
-    q.split('&').filter_map(|kv| kv.split_once('=')).find(|(a, _)| *a == k).map(|(_, v)| url_decode(v))
+    q.split('&').filter_map(|kv| kv.split_once('=').or(Some((kv, "")))).find(|(a, _)| *a == k).map(|(_, v)| url_decode(v))
 }
 
 fn url_decode(s: &str) -> String {
@@ -422,16 +674,12 @@ fn url_decode(s: &str) -> String {
 }
 
 fn read_body(rq: &mut Request) -> Result<Vec<u8>, Reply> {
-    read_body_max(rq, MAX_BODY)
-}
-
-fn read_body_max(rq: &mut Request, max: usize) -> Result<Vec<u8>, Reply> {
-    if rq.body_length().unwrap_or(0) > max {
+    if rq.body_length().unwrap_or(0) > MAX_BODY {
         return Err(Reply::err(413, "too large"));
     }
     let mut b = Vec::new();
-    rq.as_reader().take(max as u64 + 1).read_to_end(&mut b).map_err(|_| Reply::err(400, "bad body"))?;
-    if b.len() > max {
+    rq.as_reader().take(MAX_BODY as u64 + 1).read_to_end(&mut b).map_err(|_| Reply::err(400, "bad body"))?;
+    if b.len() > MAX_BODY {
         return Err(Reply::err(413, "too large"));
     }
     Ok(b)
@@ -440,6 +688,15 @@ fn read_body_max(rq: &mut Request, max: usize) -> Result<Vec<u8>, Reply> {
 /// Hash of the uploader key in the request (keys are long random strings made by the client).
 fn key_hash(rq: &Request) -> Option<String> {
     header(rq, KEY_HEADER).filter(|k| k.len() >= 32 && k.len() <= 128).map(|k| sha_hex(k.as_bytes()))
+}
+
+/// The uploader making the request: its key hash, unless missing or blocked.
+fn uploader(app: &App, rq: &Request) -> Result<String, Reply> {
+    let Some(k) = key_hash(rq) else { return Err(Reply::err(401, "key required")) };
+    if app.st().blocked.contains(&k) {
+        return Err(Reply::err(403, "this uploader is blocked"));
+    }
+    Ok(k)
 }
 
 /// Frames are `u32 len + body`; accept the upload only if it is made of whole frames.
@@ -457,7 +714,8 @@ fn is_live(s: &Stored, t: u64) -> bool {
 }
 
 /// The uploader `owner` may act on this upload: it sent it, or it owns the player name it was
-/// uploaded for (an older key of the same player, e.g. after a reinstall).
+/// uploaded for (an older key of the same player, e.g. after a reinstall). Uploads by other
+/// players that this player is in are never theirs.
 fn owns(st: &State, owner: &str, s: &Stored) -> bool {
     s.owner == owner || st.claims.get(&claim_key(&s.info.realm, &s.info.player)).is_some_and(|k| k == owner)
 }
@@ -524,12 +782,12 @@ fn shown(s: &Stored, t: u64) -> BattleInfo {
 fn remove_duplicates(data: &Path, st: &mut State) -> usize {
     let mut ids: Vec<&Stored> = st.battles.values().filter(|s| s.arena_id == 0 && s.info.file_name.is_empty()).collect();
     ids.sort_by_key(|s| s.created);
-    let mut drop = std::collections::HashSet::new();
+    let mut drop = HashSet::new();
     for (i, a) in ids.iter().enumerate() {
         if drop.contains(&a.info.id) {
             continue;
         }
-        let tanks: std::collections::HashSet<i32> = a.vehicle_ids.iter().copied().collect();
+        let tanks: HashSet<i32> = a.vehicle_ids.iter().copied().collect();
         let mut same: Vec<&Stored> = vec![a];
         for b in ids[i + 1..].iter().filter(|b| !drop.contains(&b.info.id)) {
             if b.owner == a.owner && b.info.player == a.info.player && b.info.map == a.info.map && b.vehicle_ids.iter().filter(|v| tanks.contains(v)).count() >= 3 {
@@ -555,14 +813,23 @@ fn is_live_info(st: &State, id: &str, t: u64) -> bool {
 }
 
 /// Owners (key hashes) whose live battles the given codes unlock, and the still-valid codes.
-fn unlocked(st: &State, rq: &Request) -> (Vec<String>, Vec<(String, String, u64)>) {
+/// Wrong codes count against the visitor: after a few different ones in an hour, its codes
+/// aren't looked at any more (no guessing).
+fn unlocked(app: &App, st: &State, rq: &Request, v: Visitor) -> (Vec<String>, Vec<(String, String, u64)>) {
     let t = now();
     let mut owners = Vec::new();
     let mut valid = Vec::new();
-    for c in header(rq, CODES_HEADER).unwrap_or("").split(',').map(normalize_code).filter(|c| !c.is_empty()).take(50) {
-        if let Some(code) = st.codes.get(&sha_hex(c.as_bytes())).filter(|x| x.expires > t) {
-            owners.push(code.owner.clone());
-            valid.push((c, code.owner.clone(), code.expires));
+    let codes = header(rq, CODES_HEADER).unwrap_or("");
+    if !codes.is_empty() && app.guard.may_try_codes(v) {
+        for c in codes.split(',').map(normalize_code).filter(|c| !c.is_empty()).take(CODES_PER_REQUEST) {
+            let h = sha_hex(c.as_bytes());
+            match st.codes.get(&h).filter(|x| x.expires > t) {
+                Some(code) => {
+                    owners.push(code.owner.clone());
+                    valid.push((c, code.owner.clone(), code.expires));
+                }
+                None => app.guard.bad_code(v, &h),
+            }
         }
     }
     if let Some(k) = key_hash(rq) {
@@ -571,17 +838,24 @@ fn unlocked(st: &State, rq: &Request) -> (Vec<String>, Vec<(String, String, u64)
     (owners, valid)
 }
 
-fn route(app: &App, rq: &mut Request) -> Reply {
+fn route(app: &App, rq: &mut Request, v: Visitor) -> Reply {
     let url = rq.url().to_string();
     let (path, q) = url.split_once('?').unwrap_or((&url, ""));
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
     let method = rq.method().clone();
     match (&method, parts.as_slice()) {
-        (Method::Post, ["api", "battles"]) => new_battle(app, rq),
-        (Method::Get, ["privacy"]) => Reply { status: 200, body: privacy::page().into_bytes(), ctype: "text/html; charset=utf-8", headers: vec![], compress: true },
-        (Method::Get, ["legal" | "impressum"]) => Reply { status: 200, body: privacy::legal().into_bytes(), ctype: "text/html; charset=utf-8", headers: vec![], compress: true },
+        (_, ["api", "admin", ..]) => admin::route(app, rq, &method, &parts[2..], q),
+        (Method::Get, ["admin"]) => Reply::html(admin::PAGE.to_string()).header("Cache-Control", "no-store"),
+        (Method::Get, ["admin.js"]) => Reply { status: 200, body: Body::Bytes(admin::SCRIPT.as_bytes().into()), ctype: "text/javascript", headers: vec![("Cache-Control".into(), "no-store".into())], compress: true },
+        (Method::Post, ["api", "battles"]) => new_battle(app, rq, v),
+        (Method::Get, ["privacy"]) => Reply::html(privacy::page()),
+        (Method::Get, ["legal" | "impressum"]) => Reply::html(privacy::legal()),
+        (Method::Get, ["api", "info"]) => Reply::json(&ServerInfo { contact: contact() }),
         (Method::Delete, ["api", "battles", id]) => {
-            let Some(owner) = key_hash(rq) else { return Reply::err(401, "key required") };
+            let owner = match uploader(app, rq) {
+                Ok(o) => o,
+                Err(e) => return e,
+            };
             let mut st = app.st();
             match st.battles.get(*id) {
                 Some(s) if owns(&st, &owner, s) => {
@@ -597,7 +871,7 @@ fn route(app: &App, rq: &mut Request) -> Reply {
             let st = app.st();
             let t = now();
             // Also uploads of this player's names by an older key (same player, new install).
-            let mut battles: Vec<BattleInfo> = st.battles.values().filter(|s| owns(&st, &owner, s)).map(|s| s.info.clone()).collect();
+            let mut battles: Vec<BattleInfo> = st.battles.values().filter(|s| owns(&st, &owner, s)).map(|s| shown(s, t)).collect();
             battles.sort_by(|a, b| b.updated.cmp(&a.updated));
             Reply::json(&MyData {
                 player_names: st.claims.iter().filter(|(_, k)| **k == owner).map(|(n, _)| n.clone()).collect(),
@@ -607,109 +881,40 @@ fn route(app: &App, rq: &mut Request) -> Reply {
         }
         (Method::Delete, ["api", "me"]) => {
             let Some(owner) = key_hash(rq) else { return Reply::err(401, "key required") };
-            let mut st = app.st();
-            // Everything uploaded for this player's names, whatever key sent it (every viewpoint).
-            let ids: Vec<String> = st.battles.values().filter(|s| owns(&st, &owner, s)).map(|s| s.info.id.clone()).collect();
-            for id in &ids {
-                app.remove_battle(&mut st, id);
-            }
-            st.codes.retain(|_, c| c.owner != owner);
-            st.claims.retain(|_, k| *k != owner);
-            write_json(&app.data.join("codes.json"), &st.codes);
-            write_json(&app.data.join("claims.json"), &st.claims);
-            Reply::json(&ids.len())
+            Reply::json(&forget_uploader(app, &mut app.st(), &owner))
         }
-        (Method::Delete, ["api", "admin", "assets"]) => {
-            // Reset the shared game data: the next uploaders' apps send it again.
-            if !is_admin(rq) {
-                return Reply::err(403, "admin token required");
-            }
-            let mut st = app.st();
-            let dir = app.data.join("assets");
-            for name in st.assets.keys() {
-                let _ = std::fs::remove_file(dir.join(format!("{name}.bin")));
-                let _ = std::fs::remove_file(dir.join(format!("{name}.json")));
-            }
-            let n = st.assets.len();
-            st.assets.clear();
-            Reply::json(&n)
-        }
-        (Method::Delete, ["api", "admin", "players", name]) => {
-            if !is_admin(rq) {
-                return Reply::err(403, "admin token required");
-            }
-            let name = url_decode(name).to_lowercase();
-            let mut st = app.st();
-            let ids: Vec<String> = st
-                .battles
-                .values()
-                .filter(|s| s.players.contains(&name) || s.info.player.to_lowercase() == name)
-                .map(|s| s.info.id.clone())
-                .collect();
-            for id in &ids {
-                app.remove_battle(&mut st, id);
-            }
-            // The name is free again: the next uploader of it claims it.
-            st.claims.retain(|claim, _| claim.split_once(':').map_or(true, |(_, p)| p != name));
-            write_json(&app.data.join("claims.json"), &st.claims);
-            Reply::json(&ids)
-        }
-        (Method::Get, ["api", "battles"]) => list(app, rq, q),
+        (Method::Get, ["api", "battles"]) => list(app, rq, q, v),
         (Method::Get, ["api", "battles", id]) => {
             let st = app.st();
             match st.battles.get(*id) {
-                Some(s) if !is_live(s, now()) || unlocked(&st, rq).0.contains(&s.owner) => Reply::json(&shown(s, now())),
+                Some(s) if !is_live(s, now()) || unlocked(app, &st, rq, v).0.contains(&s.owner) => Reply::json(&shown(s, now())),
                 _ => Reply::err(404, "not found"),
             }
         }
-        (Method::Post, ["api", "battles", id, "frames"]) => frames(app, rq, id, q),
-        (Method::Put, ["api", "battles", id, "replay"]) => {
-            let Some(owner) = key_hash(rq) else { return Reply::err(401, "key required") };
-            let body = match read_body_max(rq, MAX_REPLAY) {
-                Ok(b) => b,
-                Err(e) => return e,
-            };
-            // A replay file starts with the magic 0x11343212.
-            if body.len() < 12 || body[..4] != [0x12, 0x32, 0x34, 0x11] {
-                return Reply::err(400, "not a replay file");
-            }
-            let mut st = app.st();
-            match st.battles.get(*id) {
-                None => return Reply::err(404, "not found"),
-                Some(s) if s.owner != owner => return Reply::err(403, "not yours"),
-                Some(s) => {
-                    if let Some(e) = over_limit(&st, &owner, (body.len() as u64).saturating_sub(s.info.replay_size)) {
-                        return e;
-                    }
-                }
-            }
-            let Some(s) = st.battles.get_mut(*id) else { return Reply::err(404, "not found") };
-            let path = app.data.join("battles").join(format!("{id}.wotreplay"));
-            let tmp = path.with_extension("tmp");
-            if std::fs::write(&tmp, &body).and_then(|_| std::fs::rename(&tmp, &path)).is_err() {
-                return Reply::err(500, "write failed");
-            }
-            s.info.replay_size = body.len() as u64;
-            let s = s.clone();
-            app.save_battle(&s);
-            Reply::json(&s.info)
-        }
+        (Method::Post, ["api", "battles", id, "frames"]) => frames(app, rq, v, id, q),
+        (Method::Put, ["api", "battles", id, "replay"]) => put_replay(app, rq, v, id),
         (Method::Get, ["api", "battles", id, "replay"]) => {
             // Only for the uploader (GDPR access); never public.
             let Some(owner) = key_hash(rq) else { return Reply::err(401, "key required") };
-            let mine = app.st().battles.get(*id).is_some_and(|s| s.owner == owner);
+            let mine = {
+                let st = app.st();
+                st.battles.get(*id).is_some_and(|s| owns(&st, &owner, s))
+            };
             if !mine {
                 return Reply::err(404, "not found");
             }
-            match std::fs::read(app.data.join("battles").join(format!("{id}.wotreplay"))) {
-                Ok(b) => Reply::bin(b).header("Content-Disposition", format!("attachment; filename=\"{id}.wotreplay\"")),
+            match std::fs::File::open(app.data.join("battles").join(format!("{id}.wotreplay"))) {
+                Ok(f) => {
+                    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+                    Reply::file(f, 0, len).header("Content-Disposition", format!("attachment; filename=\"{id}.wotreplay\""))
+                }
                 Err(_) => Reply::err(404, "no replay file"),
             }
         }
-        (Method::Get, ["api", "battles", id, "data"]) => data(app, rq, id, q),
+        (Method::Get, ["api", "battles", id, "data"]) => data(app, rq, v, id, q),
         (Method::Get, ["api", "live"]) => {
             let st = app.st();
-            let (owners, valid) = unlocked(&st, rq);
+            let (owners, valid) = unlocked(app, &st, rq, v);
             let t = now();
             let latest_name = |owner: &str| {
                 st.battles.values().filter(|s| s.owner == owner).max_by_key(|s| s.info.updated).map(|s| s.info.player.clone()).unwrap_or_default()
@@ -721,7 +926,10 @@ fn route(app: &App, rq: &mut Request) -> Reply {
             Reply::json(&LiveList { battles, valid })
         }
         (Method::Post, ["api", "codes"]) => {
-            let Some(owner) = key_hash(rq) else { return Reply::err(401, "key required") };
+            let owner = match uploader(app, rq) {
+                Ok(o) => o,
+                Err(e) => return e,
+            };
             let Ok(body) = read_body(rq) else { return Reply::err(400, "bad body") };
             let Ok(req) = serde_json::from_slice::<NewCode>(&body) else { return Reply::err(400, "bad json") };
             let days = req.days.clamp(1, MAX_CODE_DAYS) as u64;
@@ -730,11 +938,11 @@ fn route(app: &App, rq: &mut Request) -> Reply {
             let mut st = app.st();
             let t = now();
             st.codes.retain(|_, c| c.expires > t);
-            if st.codes.values().filter(|c| c.owner == owner).count() >= 100 || st.codes.len() >= MAX_CODES {
+            if st.codes.values().filter(|c| c.owner == owner).count() >= 100 || st.codes.len() >= MAX_CODES || !app.guard.take(v, Daily::Codes, 1) {
                 return Reply::err(429, "too many codes");
             }
             st.codes.insert(sha_hex(code.as_bytes()), Code { owner, expires });
-            write_json(&app.data.join("codes.json"), &st.codes);
+            st.dirty.codes = true;
             Reply::json(&CodeInfo { code, expires })
         }
         (Method::Delete, ["api", "codes", code]) => {
@@ -743,67 +951,59 @@ fn route(app: &App, rq: &mut Request) -> Reply {
             let mut st = app.st();
             if st.codes.get(&h).is_some_and(|c| c.owner == owner) {
                 st.codes.remove(&h);
-                write_json(&app.data.join("codes.json"), &st.codes);
+                st.dirty.codes = true;
             }
             Reply::json(&())
         }
-        (Method::Get, ["api", "assets", name]) if valid_asset_name(name) => {
-            let meta = app.st().assets.get(*name).cloned();
-            let Some(meta) = meta else { return Reply::err(404, "not found") };
-            let etag = format!("\"{}\"", sha_hex(format!("{}{}", meta.version, meta.size).as_bytes())[..16].to_string());
+        (Method::Get | Method::Head, ["api", "assets", name]) if valid_asset_name(name) => {
+            app.ensure_hash(name);
+            let meta = app.st().assets.get(*name).map(|m| m.current.clone());
+            let Some(c) = meta else { return Reply::err(404, "not found") };
+            let etag = if c.hash.is_empty() { format!("\"{}\"", &sha_hex(format!("{}{}", c.version, c.size).as_bytes())[..16]) } else { format!("\"{}\"", &c.hash[..16]) };
+            let tagged = |r: Reply| r.header("ETag", etag.clone()).header("Cache-Control", "no-cache").header(VERSION_HEADER, c.version.clone()).header(HASH_HEADER, c.hash.clone());
             if header(rq, "If-None-Match") == Some(etag.as_str()) {
-                return Reply { status: 304, body: vec![], ctype: "application/octet-stream", headers: vec![("ETag".into(), etag)], compress: false };
+                return tagged(Reply { status: 304, body: Body::Bytes(Arc::from(&[][..])), ctype: "application/octet-stream", headers: vec![], compress: false });
             }
-            match std::fs::read(app.data.join("assets").join(format!("{name}.bin"))) {
-                Ok(b) => Reply::bin(b).header("ETag", etag).header("Cache-Control", "no-cache").header(VERSION_HEADER, meta.version),
+            if method == Method::Head {
+                return tagged(Reply::bin(vec![]));
+            }
+            match std::fs::File::open(app.asset_path(name)) {
+                Ok(f) => {
+                    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+                    tagged(Reply::file(f, 0, len))
+                }
                 Err(_) => Reply::err(404, "not found"),
             }
         }
-        (Method::Head, ["api", "assets", name]) if valid_asset_name(name) => {
-            let meta = app.st().assets.get(*name).cloned();
-            match meta {
-                Some(m) => Reply::bin(vec![]).header(VERSION_HEADER, m.version),
-                None => Reply::err(404, ""),
-            }
-        }
-        (Method::Put, ["api", "assets", name]) if valid_asset_name(name) => {
-            let Some(owner) = key_hash(rq) else { return Reply::err(401, "key required") };
-            let version = asset_version(&query(q, "version").unwrap_or_default());
-            if app.st().assets.get(*name).is_some_and(|m| !m.owner.is_empty() && m.owner != owner) {
-                return Reply::err(403, "this asset is kept up to date by another uploader");
-            }
-            // Map 3D packs can be large (big Steel Hunter maps ~30 MB).
-            let body = match read_asset(app, rq, name) {
-                Ok(b) => b,
+        (Method::Put, ["api", "assets", name]) if valid_asset_name(name) => put_asset(app, rq, v, name, q),
+        (Method::Post, ["api", "assets", name, "vote"]) if valid_asset_name(name) => {
+            let owner = match uploader(app, rq) {
+                Ok(o) => o,
                 Err(e) => return e,
             };
+            let hash = query(q, "hash").unwrap_or_default();
+            if !assets::valid_hash(&hash) {
+                return Reply::err(400, "bad hash");
+            }
+            app.ensure_hash(name);
             let mut st = app.st();
-            match st.assets.get(*name) {
-                // Only the first uploader replaces it (anyone else could put garbage there for everyone).
-                Some(m) if !m.owner.is_empty() && m.owner != owner => return Reply::err(403, "this asset is kept up to date by another uploader"),
-                // Only with data from the same or a newer client version.
-                Some(m) if version_key(&m.version) > version_key(&version) => return Reply::json(&()),
-                Some(_) => {}
-                None if st.assets.len() >= MAX_ASSETS => return Reply::err(507, "too many assets"),
-                None => {}
+            let counted = app.counts(&st, v, &owner);
+            let Some(mut m) = st.assets.get(*name).cloned() else { return Reply::json(&AssetVote { upload: true, counted: false }) };
+            if !m.has(&hash) {
+                return Reply::json(&AssetVote { upload: m.room().is_ok(), counted: false });
             }
-            let old = st.assets.get(*name).map_or(0, |m| m.size);
-            if let Some(e) = over_limit(&st, &owner, (body.len() as u64).saturating_sub(old)) {
-                return e;
+            if counted {
+                if let Some(i) = m.vote(&owner, &hash, now()) {
+                    app.promote(name, &mut m, i);
+                }
+                app.save_asset(name, &m);
+                st.assets.insert(name.to_string(), m);
             }
-            let dir = app.data.join("assets");
-            if std::fs::write(dir.join(format!("{name}.bin")), &body).is_err() {
-                return Reply::err(500, "write failed");
-            }
-            let meta = AssetMeta { version, size: body.len() as u64, owner };
-            write_json(&dir.join(format!("{name}.json")), &meta);
-            st.assets.insert(name.to_string(), meta);
-            st.expected.remove(*name);
-            Reply::json(&())
+            Reply::json(&AssetVote { upload: false, counted })
         }
         (Method::Post, ["api", "asset-expect"]) => {
-            if key_hash(rq).is_none() {
-                return Reply::err(401, "key required");
+            if let Err(e) = uploader(app, rq) {
+                return e;
             }
             let Ok(body) = read_body(rq) else { return Reply::err(400, "bad body") };
             let Ok(names) = serde_json::from_slice::<Vec<String>>(&body) else { return Reply::err(400, "bad json") };
@@ -811,7 +1011,7 @@ fn route(app: &App, rq: &mut Request) -> Reply {
             let mut st = app.st();
             st.expected.retain(|_, until| *until > t);
             for n in names.iter().filter(|n| valid_asset_name(n)).take(300) {
-                if st.expected.len() < MAX_ASSETS && !st.assets.contains_key(n) {
+                if st.expected.len() < 20_000 && !st.assets.contains_key(n) {
                     st.expected.insert(n.clone(), t + 600);
                 }
             }
@@ -827,7 +1027,7 @@ fn route(app: &App, rq: &mut Request) -> Reply {
                 .take(300)
                 .map(|n| {
                     let s = if let Some(m) = st.assets.get(n) {
-                        AssetStatus { state: "ready".into(), size: m.size, ..Default::default() }
+                        AssetStatus { state: "ready".into(), size: m.current.size, ..Default::default() }
                     } else if let Some(&(received, total)) = st.uploading.get(n) {
                         AssetStatus { state: "uploading".into(), received, total, ..Default::default() }
                     } else if st.expected.get(n).is_some_and(|until| *until > t) {
@@ -845,13 +1045,157 @@ fn route(app: &App, rq: &mut Request) -> Reply {
     }
 }
 
+/// Everything of one uploader key: its uploads (also those for its player names by older keys),
+/// codes, player names and asset votes. Returns how many battles went.
+fn forget_uploader(app: &App, st: &mut State, owner: &str) -> usize {
+    let view: &State = st;
+    let ids: Vec<String> = view.battles.values().filter(|s| owns(view, owner, s)).map(|s| s.info.id.clone()).collect();
+    for id in &ids {
+        app.remove_battle(st, id);
+    }
+    let n = st.codes.len();
+    st.codes.retain(|_, c| c.owner != owner);
+    st.dirty.codes |= n != st.codes.len();
+    let n = st.claims.len();
+    st.claims.retain(|_, k| *k != owner);
+    st.dirty.claims |= n != st.claims.len();
+    let voted: Vec<String> = st.assets.iter().filter(|(_, m)| m.copies().any(|c| c.votes.iter().any(|x| x.key == owner))).map(|(n, _)| n.clone()).collect();
+    for name in voted {
+        if let Some(m) = st.assets.get_mut(&name) {
+            m.forget(owner);
+            let m = m.clone();
+            app.save_asset(&name, &m);
+        }
+    }
+    ids.len()
+}
+
 /// "1.30.1.2 #123" -> comparable numbers.
+#[cfg(test)]
 fn version_key(v: &str) -> Vec<u64> {
     v.split(|c: char| !c.is_ascii_digit()).filter(|s| !s.is_empty()).filter_map(|s| s.parse().ok()).collect()
 }
 
-fn new_battle(app: &App, rq: &mut Request) -> Reply {
-    let Some(owner) = key_hash(rq) else { return Reply::err(401, "key required") };
+fn put_replay(app: &App, rq: &mut Request, v: Visitor, id: &str) -> Reply {
+    let owner = match uploader(app, rq) {
+        Ok(o) => o,
+        Err(e) => return e,
+    };
+    // Checked before the file is received, and again after.
+    let mine = |st: &State| match st.battles.get(id) {
+        None => Err(Reply::err(404, "not found")),
+        Some(s) if s.owner != owner => Err(Reply::err(403, "not yours")),
+        Some(s) => Ok(s.info.replay_size),
+    };
+    if let Err(e) = mine(&app.st()) {
+        return e;
+    }
+    let r = match app.receive(rq, v, MAX_REPLAY, None) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    // A replay file starts with the magic 0x11343212.
+    if r.size < 12 || r.head[..4] != [0x12, 0x32, 0x34, 0x11] {
+        return Reply::err(400, "not a replay file");
+    }
+    let mut st = app.st();
+    let old = match mine(&st) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    if let Some(e) = app.over_limit(&st, &owner, r.size.saturating_sub(old)) {
+        return e;
+    }
+    if r.file.place(&app.data.join("battles").join(format!("{id}.wotreplay"))).is_err() {
+        return Reply::err(500, "write failed");
+    }
+    let Some(s) = st.battles.get_mut(id) else { return Reply::err(404, "not found") };
+    s.info.replay_size = r.size;
+    let s = s.clone();
+    app.save_battle(&s);
+    Reply::json(&s.info)
+}
+
+fn put_asset(app: &App, rq: &mut Request, v: Visitor, name: &str, q: &str) -> Reply {
+    let owner = match uploader(app, rq) {
+        Ok(o) => o,
+        Err(e) => return e,
+    };
+    let version = asset_version(&query(q, "version").unwrap_or_default());
+    {
+        let st = app.st();
+        if !st.assets.contains_key(name) && !app.guard.fits(v, Daily::NewAssets, 1) {
+            return Reply::err(429, "too many new assets from here today");
+        }
+        if !st.assets.contains_key(name) && st.assets.len() >= MAX_ASSETS {
+            return Reply::err(507, "too many assets");
+        }
+    }
+    app.ensure_hash(name);
+    // Map 3D packs can be large (big Steel Hunter maps ~30 MB).
+    let r = match app.receive(rq, v, MAX_ASSET, Some(name)) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let mut st = app.st();
+    st.expected.remove(name);
+    let counted = app.counts(&st, v, &owner);
+    let t = now();
+    let copy = Copy { hash: r.hash.clone(), version, size: r.size, owner: owner.clone(), votes: vec![] };
+    let Some(mut m) = st.assets.get(name).cloned() else {
+        // The first copy is served at once.
+        if st.assets.len() >= MAX_ASSETS || !app.guard.take(v, Daily::NewAssets, 1) {
+            return Reply::err(507, "too many assets");
+        }
+        if let Some(e) = app.over_limit(&st, &owner, r.size) {
+            return e;
+        }
+        if r.file.place(&app.asset_path(name)).is_err() {
+            return Reply::err(500, "write failed");
+        }
+        let mut m = AssetMeta { current: copy, others: vec![] };
+        if counted {
+            m.vote(&owner, &r.hash, t);
+        }
+        app.save_asset(name, &m);
+        st.assets.insert(name.to_string(), m);
+        return Reply::json(&AssetVote { upload: false, counted });
+    };
+    if !m.has(&r.hash) {
+        // Another copy: kept as a candidate if there is room (a candidate nobody else voted for
+        // makes way; one with support doesn't).
+        if let Some(e) = app.over_limit(&st, &owner, r.size) {
+            return e;
+        }
+        match m.room() {
+            Err(()) => return Reply::json(&AssetVote { upload: false, counted: false }),
+            Ok(Some(i)) => {
+                let gone = m.others.remove(i);
+                let _ = std::fs::remove_file(app.candidate_path(name, &gone.hash));
+                *app.usage.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            }
+            Ok(None) => {}
+        }
+        if r.file.place(&app.candidate_path(name, &r.hash)).is_err() {
+            return Reply::err(500, "write failed");
+        }
+        m.others.push(copy);
+    }
+    if counted {
+        if let Some(i) = m.vote(&owner, &r.hash, t) {
+            app.promote(name, &mut m, i);
+        }
+    }
+    app.save_asset(name, &m);
+    st.assets.insert(name.to_string(), m);
+    Reply::json(&AssetVote { upload: false, counted })
+}
+
+fn new_battle(app: &App, rq: &mut Request, v: Visitor) -> Reply {
+    let owner = match uploader(app, rq) {
+        Ok(o) => o,
+        Err(e) => return e,
+    };
     let body = match read_body(rq) {
         Ok(b) => b,
         Err(e) => return e,
@@ -878,14 +1222,23 @@ fn new_battle(app: &App, rq: &mut Request) -> Reply {
     // The first key that uploads for a player name owns it.
     let claim = claim_key(&nb.realm, &nb.player);
     match st.claims.get(&claim) {
-        Some(k) if *k != owner => return Reply::err(403, "this player name belongs to another uploader"),
+        Some(k) if *k != owner => {
+            let c = contact();
+            let msg = if c.is_empty() {
+                "this player name belongs to another uploader".to_string()
+            } else {
+                format!("this player name belongs to another uploader. If it is yours, write to {c}")
+            };
+            return Reply::err(403, &msg);
+        }
         Some(_) => {}
         None if st.claims.len() >= MAX_CLAIMS || st.claims.values().filter(|k| **k == owner).count() >= CLAIMS_PER_KEY => {
             return Reply::err(429, "too many player names for one uploader")
         }
+        None if !app.guard.take(v, Daily::Claims, 1) => return Reply::err(429, "too many new player names from here today"),
         None => {
             st.claims.insert(claim, owner.clone());
-            write_json(&app.data.join("claims.json"), &st.claims);
+            st.dirty.claims = true;
         }
     }
     // The same battle again for this player (app restart, a manual upload, the finished replay of
@@ -939,12 +1292,8 @@ fn new_battle(app: &App, rq: &mut Request) -> Reply {
     }
     let t = now();
     let today = st.battles.values().filter(|s| s.owner == owner && t.saturating_sub(s.created) < 86400).count();
-    if today >= env_num("MAX_BATTLES_PER_DAY", BATTLES_PER_DAY as u64) as usize {
+    if today >= env_num("MAX_BATTLES_PER_DAY", BATTLES_PER_DAY as u64) as usize || !app.guard.take(v, Daily::Battles, 1) {
         return Reply::err(429, "upload limit reached for today");
-    }
-    let all_today = st.battles.values().filter(|s| t.saturating_sub(s.created) < 86400).count();
-    if all_today as u64 >= env_num("MAX_NEW_BATTLES_PER_DAY", NEW_BATTLES_PER_DAY) {
-        return Reply::err(429, "the server takes no more battles today");
     }
     let id = loop {
         let id = token(10).to_ascii_lowercase();
@@ -952,7 +1301,7 @@ fn new_battle(app: &App, rq: &mut Request) -> Reply {
             break id;
         }
     };
-    let info = BattleInfo {
+    let mut info = BattleInfo {
         id: id.clone(),
         player: nb.player,
         realm: nb.realm,
@@ -973,11 +1322,10 @@ fn new_battle(app: &App, rq: &mut Request) -> Reply {
         uploaders: Vec::new(),
         interrupted: false,
     };
-    let mut info = info;
     // Another player's upload of the same battle: the same arenaUniqueID (also while live);
     // for uploads without it, same realm, map and day and shared tanks (finished battles only).
     let day = |d: &str| d.get(..10).unwrap_or("").to_string();
-    let mine: std::collections::HashSet<i32> = nb.vehicle_ids.iter().copied().collect();
+    let mine: HashSet<i32> = nb.vehicle_ids.iter().copied().collect();
     let other_player = |s: &&Stored| !s.info.player.eq_ignore_ascii_case(&info.player);
     let mate = if nb.arena_id != 0 {
         st.battles.values().filter(other_player).find(|s| s.arena_id == nb.arena_id).map(|s| s.info.id.clone())
@@ -1004,8 +1352,11 @@ fn new_battle(app: &App, rq: &mut Request) -> Reply {
     Reply::json(&info)
 }
 
-fn frames(app: &App, rq: &mut Request, id: &str, q: &str) -> Reply {
-    let Some(owner) = key_hash(rq) else { return Reply::err(401, "key required") };
+fn frames(app: &App, rq: &mut Request, v: Visitor, id: &str, q: &str) -> Reply {
+    let owner = match uploader(app, rq) {
+        Ok(o) => o,
+        Err(e) => return e,
+    };
     let body = match read_body(rq) {
         Ok(b) => b,
         Err(e) => return e,
@@ -1014,37 +1365,63 @@ fn frames(app: &App, rq: &mut Request, id: &str, q: &str) -> Reply {
         return Reply::err(400, "bad frames");
     }
     let reset = query(q, "reset").is_some();
-    let mut st = app.st();
-    // Storage limits: per uploader and for the whole server.
-    if let Some(e) = over_limit(&st, &owner, body.len() as u64) {
-        return e;
+    let len = body.len() as u64;
+    if !app.guard.take(v, Daily::Bytes, len) {
+        return Reply::err(429, "upload limit reached for today");
     }
-    let Some(s) = st.battles.get_mut(id) else { return Reply::err(404, "not found") };
-    if s.owner != owner {
-        return Reply::err(403, "not yours");
-    }
-    // Finished battles are immutable (they are cached forever) unless replaced as a whole.
-    if !s.info.live && s.info.size > 0 && !reset {
-        return Reply::err(409, "battle is finished");
-    }
-    if (if reset { 0 } else { s.info.size }) + body.len() as u64 > MAX_BATTLE {
-        return Reply::err(413, "battle too large");
-    }
+    // One writer per battle; the file is written with the shared state unlocked.
+    let io = app.io_lock(id);
+    let _io = io.lock().unwrap_or_else(|e| e.into_inner());
+    let base = {
+        let st = app.st();
+        let Some(s) = st.battles.get(id) else { return Reply::err(404, "not found") };
+        if s.owner != owner {
+            return Reply::err(403, "not yours");
+        }
+        // Finished battles are immutable (they are cached forever) unless replaced as a whole.
+        if !s.info.live && s.info.size > 0 && !reset {
+            return Reply::err(409, "battle is finished");
+        }
+        let base = if reset { 0 } else { s.info.size };
+        if base + len > MAX_BATTLE {
+            return Reply::err(413, "battle too large");
+        }
+        // Storage limits: per uploader and for the whole server.
+        if let Some(e) = app.over_limit(&st, &owner, (base + len).saturating_sub(s.info.size)) {
+            return e;
+        }
+        base
+    };
     let path = app.data.join("battles").join(format!("{id}.bin"));
     let ok = if reset {
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, &body).and_then(|_| std::fs::rename(&tmp, &path)).is_ok()
+        write_atomic(&path, &body).is_ok()
     } else {
-        std::fs::OpenOptions::new().create(true).append(true).open(&path).and_then(|mut f| f.write_all(&body)).is_ok()
+        // Anything after the known size is left from a failed earlier write: cut it off.
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .and_then(|mut f| {
+                f.set_len(base)?;
+                f.seek(std::io::SeekFrom::Start(base))?;
+                f.write_all(&body)
+            })
+            .is_ok()
     };
     if !ok {
         return Reply::err(500, "write failed");
     }
+    let mut st = app.st();
+    let Some(s) = st.battles.get_mut(id) else {
+        // Deleted meanwhile.
+        let _ = std::fs::remove_file(&path);
+        return Reply::err(404, "not found");
+    };
     if reset {
-        s.info.size = 0;
         s.info.gen += 1;
     }
-    s.info.size += body.len() as u64;
+    s.info.size = base + len;
     s.info.updated = now();
     if query(q, "finish").is_some() {
         s.info.live = false;
@@ -1058,32 +1435,31 @@ fn frames(app: &App, rq: &mut Request, id: &str, q: &str) -> Reply {
     Reply::json(&s.info)
 }
 
-fn data(app: &App, rq: &mut Request, id: &str, q: &str) -> Reply {
+fn data(app: &App, rq: &mut Request, v: Visitor, id: &str, q: &str) -> Reply {
     let (info, allowed) = {
         let st = app.st();
         let Some(s) = st.battles.get(id) else { return Reply::err(404, "not found") };
         let live = is_live(s, now());
-        (s.info.clone(), !live || unlocked(&st, rq).0.contains(&s.owner))
+        (s.info.clone(), !live || unlocked(app, &st, rq, v).0.contains(&s.owner))
     };
     if !allowed {
         return Reply::err(403, "live battle: needs a viewing code from the player");
     }
     let gen_ok = query(q, "gen").and_then(|g| g.parse::<u32>().ok()) == Some(info.gen);
     let from = if gen_ok { query(q, "from").and_then(|f| f.parse::<u64>().ok()).unwrap_or(0).min(info.size) } else { 0 };
-    let mut f = match std::fs::File::open(app.data.join("battles").join(format!("{id}.bin"))) {
+    let tag = |r: Reply| {
+        let finished = !info.live;
+        r.header(GEN_HEADER, info.gen.to_string())
+            .header("X-Livereplay-Finished", if finished { "1" } else { "0" })
+            .header("Cache-Control", if finished && from == 0 { "public, max-age=31536000, immutable" } else { "no-store" })
+    };
+    let f = match std::fs::File::open(app.data.join("battles").join(format!("{id}.bin"))) {
         Ok(f) => f,
         Err(_) => return Reply::bin(vec![]).header(GEN_HEADER, info.gen.to_string()),
     };
-    use std::io::Seek;
-    let mut buf = Vec::with_capacity((info.size - from) as usize);
-    if f.seek(std::io::SeekFrom::Start(from)).is_err() || f.take(info.size - from).read_to_end(&mut buf).is_err() {
-        return Reply::err(500, "read failed");
-    }
-    let finished = !info.live;
-    Reply::bin(buf)
-        .header(GEN_HEADER, info.gen.to_string())
-        .header("X-Livereplay-Finished", if finished { "1" } else { "0" })
-        .header("Cache-Control", if finished && from == 0 { "public, max-age=31536000, immutable" } else { "no-store" })
+    // Never promise more than the file has (it may have been replaced meanwhile).
+    let end = info.size.min(f.metadata().map(|m| m.len()).unwrap_or(0));
+    tag(Reply::file(f, from.min(end), end - from.min(end)))
 }
 
 /// Several uploads of one battle (a group) shown once: the first, with every uploader's name.
@@ -1095,7 +1471,7 @@ fn one_per_battle(v: Vec<BattleInfo>) -> Vec<BattleInfo> {
             n.push(b.player.clone());
         }
     }
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     v.into_iter()
         .filter(|b| b.group.is_empty() || seen.insert(b.group.clone()))
         .map(|mut b| {
@@ -1107,21 +1483,32 @@ fn one_per_battle(v: Vec<BattleInfo>) -> Vec<BattleInfo> {
         .collect()
 }
 
-fn list(app: &App, rq: &Request, q: &str) -> Reply {
+fn list(app: &App, rq: &Request, q: &str, v: Visitor) -> Reply {
     let player = query(q, "player").unwrap_or_default().to_lowercase();
     let group = query(q, "group").unwrap_or_default();
-    let page = query(q, "page").and_then(|p| p.parse().ok()).unwrap_or(0usize);
+    let page = query(q, "page").and_then(|p| p.parse().ok()).unwrap_or(0usize).min(100_000);
+    // What everyone sees (no key, no codes) is the same for everyone: answered from a cache.
+    let public = group.is_empty() || (key_hash(rq).is_none() && header(rq, CODES_HEADER).is_none_or(str::is_empty));
+    let cache_key = format!("{player}\n{group}\n{page}");
+    let epoch = app.st().epoch;
+    if public {
+        if let Some((e, at, b)) = app.list_cache.lock().unwrap_or_else(|e| e.into_inner()).get(&cache_key) {
+            if *e == epoch && at.elapsed() < LIST_CACHE {
+                return Reply::json_bytes(b.clone());
+            }
+        }
+    }
     let st = app.st();
     let t = now();
     // A group's live members too, for whoever may see them (viewing code, or the uploader).
-    let owners = if group.is_empty() { Vec::new() } else { unlocked(&st, rq).0 };
+    let owners = if group.is_empty() { Vec::new() } else { unlocked(app, &st, rq, v).0 };
     let mut v: Vec<BattleInfo> = st
         .battles
         .values()
         .filter(|s| (!is_live(s, t) || owners.contains(&s.owner)) && s.info.size > 0)
+        .filter(|s| player.is_empty() || s.info.player.to_lowercase().contains(&player))
+        .filter(|s| group.is_empty() || s.info.group == group)
         .map(|s| shown(s, t))
-        .filter(|i| player.is_empty() || i.player.to_lowercase().contains(&player))
-        .filter(|i| group.is_empty() || i.group == group)
         .collect();
     let key = |d: &str| {
         let (day, time) = d.split_once(' ').unwrap_or((d, ""));
@@ -1140,7 +1527,16 @@ fn list(app: &App, rq: &Request, q: &str) -> Reply {
         i.live = is_live_info(&st, &i.id, t);
         i
     });
-    Reply::json(&BattleList { battles: battles.collect(), total, page, per_page: PER_PAGE })
+    let body: Arc<[u8]> = serde_json::to_vec(&BattleList { battles: battles.collect(), total, page, per_page: PER_PAGE }).unwrap_or_default().into();
+    drop(st);
+    if public {
+        let mut c = app.list_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if c.len() > 2000 {
+            c.clear();
+        }
+        c.insert(cache_key, (epoch, Instant::now(), body.clone()));
+    }
+    Reply::json_bytes(body)
 }
 
 fn static_file(app: &App, rq: &Request, path: &str) -> Reply {
@@ -1148,29 +1544,40 @@ fn static_file(app: &App, rq: &Request, path: &str) -> Reply {
     let f = app.web.get(path).or_else(|| app.web.get("/index.html"));
     let Some(f) = f else { return Reply::err(404, "web viewer not installed") };
     if header(rq, "If-None-Match") == Some(f.etag.as_str()) {
-        return Reply { status: 304, body: vec![], ctype: f.ctype, headers: vec![("ETag".into(), f.etag.clone())], compress: false };
+        return Reply { status: 304, body: Body::Bytes(Arc::from(&[][..])), ctype: f.ctype, headers: vec![("ETag".into(), f.etag.clone())], compress: false };
     }
     let accept = header(rq, "Accept-Encoding").unwrap_or("");
-    let mut r = Reply { status: 200, body: vec![], ctype: f.ctype, headers: vec![("ETag".into(), f.etag.clone()), ("Cache-Control".into(), "no-cache".into())], compress: false };
+    let mut r = Reply { status: 200, body: Body::Bytes(f.body.clone()), ctype: f.ctype, headers: vec![("ETag".into(), f.etag.clone()), ("Cache-Control".into(), "no-cache".into())], compress: false };
     match (&f.br, &f.gz) {
         (Some(b), _) if accept.contains("br") => {
-            r.body = b.clone();
+            r.body = Body::Bytes(b.clone());
             r.headers.push(("Content-Encoding".into(), "br".into()));
         }
         (_, Some(z)) if accept.contains("gzip") => {
-            r.body = z.clone();
+            r.body = Body::Bytes(z.clone());
             r.headers.push(("Content-Encoding".into(), "gzip".into()));
         }
-        _ => r.body = f.body.clone(),
+        _ => {}
     }
     r.headers.push(("Vary".into(), "Accept-Encoding".into()));
     r
 }
 
 fn respond(rq: Request, r: Reply) {
-    let gz_ok = r.compress && r.body.len() > 512 && header(&rq, "Accept-Encoding").is_some_and(|a| a.contains("gzip"));
-    let body = if gz_ok { gzip(&r.body) } else { r.body };
-    let mut resp = Response::from_data(body).with_status_code(r.status);
+    let gz_ok = matches!(&r.body, Body::Bytes(b) if r.compress && b.len() > 512) && header(&rq, "Accept-Encoding").is_some_and(|a| a.contains("gzip"));
+    let (reader, len): (Box<dyn Read + Send>, usize) = match r.body {
+        Body::Bytes(b) if gz_ok => {
+            let z = gzip(&b, 5);
+            let n = z.len();
+            (Box::new(std::io::Cursor::new(z)), n)
+        }
+        Body::Bytes(b) => {
+            let n = b.len();
+            (Box::new(std::io::Cursor::new(b)), n)
+        }
+        Body::Stream(s, n) => (s, n),
+    };
+    let mut resp = Response::new(StatusCode(r.status), vec![], reader, Some(len), None);
     let mut add = |k: &str, v: &str| {
         // Never a control character (CR/LF would start a header of the sender's choosing).
         if v.bytes().any(|b| b < 0x20 || b == 0x7f) || k.bytes().any(|b| !b.is_ascii_graphic() || b == b':') {
@@ -1205,6 +1612,35 @@ fn respond(rq: Request, r: Reply) {
     let _ = rq.respond(resp);
 }
 
+/// Housekeeping every minute: expired codes and votes, battles that never got data, memory.
+fn maintain(app: &App) {
+    let t = now();
+    {
+        let mut st = app.st();
+        let n = st.codes.len();
+        st.codes.retain(|_, c| c.expires > t);
+        st.dirty.codes |= n != st.codes.len();
+        st.expected.retain(|_, until| *until > t);
+        let empty: Vec<String> = st.battles.values().filter(|s| s.info.size == 0 && s.info.replay_size == 0 && t.saturating_sub(s.created) > EMPTY_BATTLE_SECS).map(|s| s.info.id.clone()).collect();
+        for id in &empty {
+            app.remove_battle(&mut st, id);
+        }
+        let mut changed = Vec::new();
+        for (name, m) in st.assets.iter_mut() {
+            if m.expire(t) {
+                changed.push((name.clone(), m.clone()));
+            }
+        }
+        for (name, m) in changed {
+            app.save_asset(&name, &m);
+        }
+    }
+    app.io_locks.lock().unwrap_or_else(|e| e.into_inner()).retain(|_, l| Arc::strong_count(l) > 1);
+    app.list_cache.lock().unwrap_or_else(|e| e.into_inner()).retain(|_, (_, at, _)| at.elapsed() < LIST_CACHE);
+    app.guard.tidy();
+    app.flush();
+}
+
 fn main() {
     let bind = std::env::var("BIND").unwrap_or_else(|_| "0.0.0.0:8080".into());
     let data = PathBuf::from(std::env::var("DATA_DIR").unwrap_or_else(|_| "data".into()));
@@ -1213,14 +1649,26 @@ fn main() {
     let app = Arc::new(App::load(data, &web));
     let server = Arc::new(Server::http(&bind).expect("bind"));
     println!("listening on http://{bind}");
+    {
+        let app = app.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(60));
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| maintain(&app)));
+        });
+    }
     let workers: Vec<_> = (0..threads.max(1))
         .map(|_| {
             let (app, server) = (app.clone(), server.clone());
             std::thread::spawn(move || {
                 for mut rq in server.incoming_requests() {
-                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| route(&app, &mut rq)))
-                        .unwrap_or_else(|_| Reply::err(500, "internal error"));
+                    let v = app.guard.visitor(rq.remote_addr(), header(&rq, "X-Forwarded-For"));
+                    let r = if app.guard.request(v) {
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| route(&app, &mut rq, v))).unwrap_or_else(|_| Reply::err(500, "internal error"))
+                    } else {
+                        Reply::err(429, "too many requests").header("Retry-After", "10")
+                    };
                     respond(rq, r);
+                    app.flush();
                 }
             })
         })
@@ -1297,12 +1745,16 @@ mod tests {
         assert!(whole_frames(&[2, 0, 0, 0, 9, 9, 1, 0, 0, 0, 5]));
         assert!(!whole_frames(&[2, 0, 0, 0, 9]));
         assert_eq!(url_decode("a%20b+c"), "a b c");
+        assert_eq!(query("reset&finish=1", "reset").as_deref(), Some(""));
+        assert_eq!(query("a=1&finish=1", "finish").as_deref(), Some("1"));
         assert_eq!(date_secs("01.01.1970 00:00:00"), Some(0));
         assert_eq!(date_secs("21.11.2026 01:43:04").zip(date_secs("21.11.2026 01:41:26")).map(|(a, b)| a - b), Some(98));
         assert_eq!(date_secs("01.03.2024 00:00:00").zip(date_secs("29.02.2024 23:59:59")).map(|(a, b)| a - b), Some(1));
         assert_eq!(date_secs("21.11.2026"), None);
+        assert_eq!(date_secs("99.99.99999999999 1:1:1"), None);
         assert!(version_key("1.31.0.2") > version_key("1.30.1"));
         assert_eq!(token(10).len(), 10);
+        assert!(token(200).bytes().all(|b| b"23456789ABCDEFGHJKMNPQRSTUVWXYZ".contains(&b)));
         assert_eq!(clean("a\r\nb\u{0}c  ", 100), "abc");
         assert_eq!(clean("abcdef", 3), "abc");
         assert!(valid_player("windows_2000") && valid_player("Ab-c") && !valid_player("") && !valid_player("a b") && !valid_player("a\nb"));

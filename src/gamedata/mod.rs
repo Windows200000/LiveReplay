@@ -93,7 +93,9 @@ pub struct ArenaDef {
     /// Random-event minimap overlays (e.g. `mmap_bigCityBombing_destroyed.dds`).
     #[serde(default)]
     pub minimap_layers: Vec<String>,
-    pub gameplay: HashMap<String, GameplayDef>,
+    /// Sorted, so the same game files always give the same map pack (the server compares
+    /// uploads by their hash).
+    pub gameplay: std::collections::BTreeMap<String, GameplayDef>,
 }
 
 impl ArenaDef {
@@ -219,7 +221,7 @@ impl GameData {
         let bb = root.child("boundingBox")?;
         let bl = bb.child("bottomLeft")?.floats();
         let ur = bb.child("upperRight")?.floats();
-        let mut gameplay = HashMap::new();
+        let mut gameplay = std::collections::BTreeMap::new();
         if let Some(g) = root.child("gameplayTypes") {
             for gt in &g.children {
                 let mut def = GameplayDef::default();

@@ -45,11 +45,15 @@ uploader's own detailed results). It is kept so that features can later show mor
 to anyone except the uploader, and is deleted with the battle.</li>
 <li><b>Uploaders:</b> a random key created by the app (stored only as a hash) and the player names that key uploads for.</li>
 <li><b>Live viewing codes:</b> stored only as a hash, with the key that made them and their expiry date. Expired codes are deleted.</li>
-<li><b>Game data</b> (map pictures, 3D models, icons) uploaded by the app from the player's game files. No personal data.</li>
+<li><b>Game data</b> (map pictures, 3D models, icons) uploaded by the app from the player's game files, with the hashed
+keys of the apps that sent or confirmed each copy (so that the copy most apps agree on is shown). Votes expire after 120 days.</li>
 </ul>
 
 <h2>What is not stored</h2>
 <p>No IP addresses or access logs, no cookies, no analytics or tracking, no accounts or passwords, no e-mail addresses.
+To stop abuse (too many requests, mass uploads, guessing viewing codes), the server counts requests per network address
+in memory only: the address is replaced by a salted hash that changes at every restart, never written to disk, and the
+counts are forgotten after at most a day (legitimate interest, Art. 6(1)(f) GDPR, in keeping the service available).
 The website loads nothing from other servers. Your browser keeps your display settings and the viewing codes you entered
 in its local storage; codes are only sent to this server to show you the live battles they unlock.
 A link to tomato.gg in a player's stats card leaves this site only when you click it.</p>
@@ -77,6 +81,8 @@ from the player who uploads it.</p>
 on the server</i>; single battles: right-click a replay &gt; <i>Delete from server</i>.</li>
 <li><b>Players in someone else's upload:</b> write to {contact_html} with your player name and server (e.g. EU).
 All battles containing your name are removed, usually within a few days and at the latest within one month.</li>
+<li><b>Someone else uploads under your player name</b> (the app says the name "belongs to another uploader"): write to
+{contact_html}; their uploads under your name are removed and the name is freed for you.</li>
 </ul>
 
 <h2>Recipients</h2>
