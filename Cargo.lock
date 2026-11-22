@@ -1978,7 +1978,7 @@ checksum = "4744e383959f0db86ede514b809b1c53251889093803c05267acc7d4e7030d70"
 
 [[package]]
 name = "livereplay"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "blowfish",
@@ -2002,14 +2002,14 @@ dependencies = [
 
 [[package]]
 name = "livereplay-api"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "livereplay-server"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "brotli",
  "flate2",
@@ -2023,7 +2023,7 @@ dependencies = [
 
 [[package]]
 name = "livereplay-web"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "eframe",
  "egui",

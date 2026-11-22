@@ -135,6 +135,8 @@ What's planned, what's done, and the project rules. Kept up to date with every c
 Nothing open.
 
 ### Done
+- Release 1.1.0 (user): everything below since 1.0.0 (security work, dependency upgrades, smooth live playback,
+  self-updating lists, damage stats); installed apps update themselves to it
 - Damage stats next to each team's HP bar (user): dealt, blocked (shells that hit without damage: bounced or not
   penetrated) and missed (shells that hit no tank); whole battle on top, last minute below; hover explains them. Only
   what the recording saw (more with merged viewpoints). Dealt is exact (every health loss by its cause); blocked and
